@@ -19,8 +19,8 @@ use lambda::error::HandlerError;
 
 use std::cell::RefCell;
 use std::error::Error;
-use std::io::{self, Read, Write};
 use std::fmt::Write as FmtWrite;
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -182,12 +182,15 @@ fn my_handler(e: LambdaSenderStart, _c: lambda::Context) -> Result<LambdaResult,
     let s3client = aws_s3::S3Client::new(aws::Region::UsWest2);
     let object_name = format!("sender-results-{}.csv", rand::random::<u32>());
 
-    s3client.put_object(aws_s3::PutObjectRequest{
-        bucket: consts::S3_BUCKET.to_owned(),
-        key: object_name,
-        body: Some(formatted_results.into_bytes().into()),
-        ..aws_s3::PutObjectRequest::default()
-    }).sync().unwrap();
+    s3client
+        .put_object(aws_s3::PutObjectRequest {
+            bucket: consts::S3_BUCKET.to_owned(),
+            key: object_name,
+            body: Some(formatted_results.into_bytes().into()),
+            ..aws_s3::PutObjectRequest::default()
+        })
+        .sync()
+        .unwrap();
 
     Ok(LambdaResult {})
 }
