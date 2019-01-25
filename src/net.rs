@@ -21,10 +21,10 @@ pub fn open_public_udp() -> (UdpSocket, SocketAddr) {
             .recv_from(&mut buf)
             .expect("No response from STUN server");
         let response = stun::Message::decode(buf[..bytes].to_vec());
-        socket.set_nonblocking(true).unwrap();
         for attr in response.attributes {
             match attr {
                 stun::Attribute::XorMappedAddress(stun::XorMappedAddress(addr)) => {
+                    socket.set_nonblocking(true).unwrap();
                     return (socket, addr);
                 }
                 _ => {}
