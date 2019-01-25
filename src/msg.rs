@@ -17,21 +17,23 @@ pub mod experiment {
     use std::time::Duration;
     #[derive(Deserialize, Serialize, Debug, Clone)]
     pub struct RoundPlan {
-        pub round_i: u16,
-        pub interval: Duration,
-        pub packets_per_interval: u16,
+        pub round_index: u16,
+        pub burst_period: Duration,
+        pub packets_per_burst: u16,
         pub duration: Duration,
     }
 
     #[derive(Deserialize, Serialize, Debug, Clone)]
     pub struct RoundSenderResults {
         pub plan: RoundPlan,
-        pub first_packet_id: usize,
-        pub packets_sent: usize,
+        pub first_packet_id: u64,
+        pub packets_sent: u64,
+        pub bytes_sent: u64,
     }
+
     #[derive(Deserialize, Serialize, Debug, Clone)]
     pub struct ExperimentReceiverResults {
-        pub packets_recieved: Vec<usize>,
+        pub packets_recieved: Vec<u64>,
     }
 
     #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -53,6 +55,7 @@ pub enum LocalMessage {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum SenderMessage {
+    ReceiverPing,
     ReceiverAddr(SocketAddr),
 }
 
