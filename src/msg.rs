@@ -5,12 +5,14 @@ use std::net::SocketAddr;
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct LambdaSenderStart {
     pub local_addr: SocketAddr,
+    pub exp_id: u32,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct LambdaReceiverStart {
     pub local_addr: SocketAddr,
     pub sender_addr: SocketAddr,
+    pub exp_id: u32,
 }
 
 pub mod experiment {
@@ -29,11 +31,7 @@ pub mod experiment {
         pub first_packet_id: u64,
         pub packets_sent: u64,
         pub bytes_sent: u64,
-    }
-
-    #[derive(Deserialize, Serialize, Debug, Clone)]
-    pub struct ExperimentReceiverResults {
-        pub packets_recieved: Vec<u64>,
+        pub errors: u64,
     }
 
     #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -49,16 +47,18 @@ pub struct LambdaResult {}
 pub enum LocalMessage {
     SenderPing(SocketAddr),
     ReceiverPing(SocketAddr),
+    ReceiverStats{
+        packet_count: u64,
+        byte_count: u64,
+        errors: u64,
+    },
     StartRound(experiment::RoundPlan),
-    FinishRound,
+    FinishRound(experiment::RoundSenderResults),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum SenderMessage {
+    Die,
     ReceiverPing,
     ReceiverAddr(SocketAddr),
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub enum ReceiverMessage {
 }

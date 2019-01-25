@@ -32,15 +32,42 @@ use msg::experiment::{RoundPlan, RoundSenderResults};
 use msg::{LambdaResult, LambdaSenderStart, LocalMessage, SenderMessage};
 
 const UDP_PAYLOAD_BYTES: usize = 1400;
-const EXP_PLAN: [RoundPlan; 1] = [RoundPlan {
-    round_index: 0,
-    burst_period: Duration::from_millis(10),
-    packets_per_burst: 1,
-    duration: Duration::from_secs(2),
-}];
+const EXP_PLAN: [RoundPlan; 5] = [
+    RoundPlan {
+        round_index: 0,
+        burst_period: Duration::from_millis(100),
+        packets_per_burst: 1,
+        duration: Duration::from_secs(5),
+    },
+    RoundPlan {
+        round_index: 1,
+        burst_period: Duration::from_millis(100),
+        packets_per_burst: 3,
+        duration: Duration::from_secs(5),
+    },
+    RoundPlan {
+        round_index: 2,
+        burst_period: Duration::from_millis(10),
+        packets_per_burst: 1,
+        duration: Duration::from_secs(5),
+    },
+    RoundPlan {
+        round_index: 3,
+        burst_period: Duration::from_millis(10),
+        packets_per_burst: 3,
+        duration: Duration::from_secs(5),
+    },
+    RoundPlan {
+        round_index: 4,
+        burst_period: Duration::from_millis(10),
+        packets_per_burst: 10,
+        duration: Duration::from_secs(5),
+    },
+];
 
 thread_local! {
-    pub static UDP_BUF: RefCell<[u8; UDP_PAYLOAD_BYTES]> = RefCell::new([b'Q'; UDP_PAYLOAD_BYTES]);
+    pub static UDP_BUF: RefCell<[u8; consts::UDP_PAYLOAD_BYTES]> =
+        RefCell::new([b'Q'; consts::UDP_PAYLOAD_BYTES]);
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -58,16 +85,17 @@ struct Sender {
 }
 
 impl Sender {
-    fn new(start_command: LambdaSenderStart) -> Result<Self, Box<dyn Error>> {
+    fn new(start_command: &LambdaSenderStart) -> Result<Self, Box<dyn Error>> {
         info!("Staring with invocation {:?}", start_command);
         let (socket, my_addr) = net::open_public_udp();
-        let mut tcp = TcpStream::connect(start_command.local_addr).unwrap();
+        let mut tcp = TcpStream::connect((start_command.local_addr.ip(), net::TCP_PORT)).unwrap();
         tcp.write_all(
             bincode::serialize(&LocalMessage::SenderPing(my_addr))
                 .unwrap()
                 .as_slice(),
         )
         .unwrap();
+        tcp.flush().unwrap();
         let receiver_addr = {
             let mut data = Vec::new();
             tcp.read_to_end(&mut data).unwrap();
@@ -109,17 +137,23 @@ impl Sender {
         let first_packet_id = self.next_packet_id;
         let mut packets_sent = 0;
         let mut bytes_sent = 0;
+        let mut errors = 0;
 
         while Instant::now() < end_time {
-            self.send_packet_to_receiver()
-                .map(|bytes_sent_in_this_packet| {
+            match self.send_packet_to_receiver() {
+                Ok(bytes_sent_in_this_packet) => {
                     packets_sent += 1;
                     bytes_sent += bytes_sent_in_this_packet as u64;
-                })
-                .ok();
+                }
+                Err(e) => {
+                    warn!("Error! {:?}", e);
+                    errors += 1;
+                }
+            }
         }
         RoundSenderResults {
             plan: round_plan.clone(),
+            errors,
             first_packet_id,
             packets_sent,
             bytes_sent,
@@ -133,7 +167,7 @@ impl Sender {
                 self.send_to_master(&LocalMessage::StartRound(round_plan.clone()));
                 let round_result = self.run_round(round_plan);
                 std::thread::sleep(Duration::from_millis(200));
-                self.send_to_master(&LocalMessage::FinishRound);
+                self.send_to_master(&LocalMessage::FinishRound(round_result.clone()));
                 std::thread::sleep(Duration::from_secs(2));
                 round_result
             })
@@ -175,12 +209,12 @@ fn format_results<'a>(results: impl Iterator<Item = &'a RoundSenderResults>) -> 
 fn my_handler(e: LambdaSenderStart, _c: lambda::Context) -> Result<LambdaResult, HandlerError> {
     info!("Lambda with event {:?} is alive", e);
 
-    let exp_results = Sender::new(e).unwrap().run_exp();
+    let exp_results = Sender::new(&e).unwrap().run_exp();
 
     let formatted_results = format_results(exp_results.iter());
 
     let s3client = aws_s3::S3Client::new(aws::Region::UsWest2);
-    let object_name = format!("sender-results-{}.csv", rand::random::<u32>());
+    let object_name = format!("sender-results-{}.csv", e.exp_id);
 
     s3client
         .put_object(aws_s3::PutObjectRequest {
