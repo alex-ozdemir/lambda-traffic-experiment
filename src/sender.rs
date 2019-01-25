@@ -32,7 +32,7 @@ use msg::experiment::{RoundPlan, RoundSenderResults};
 use msg::{LambdaResult, LambdaSenderStart, LocalMessage, SenderMessage};
 
 const UDP_PAYLOAD_BYTES: usize = 1400;
-const EXP_PLAN: [RoundPlan; 5] = [
+const EXP_PLAN: [RoundPlan; 7] = [
     RoundPlan {
         round_index: 0,
         burst_period: Duration::from_millis(100),
@@ -61,6 +61,18 @@ const EXP_PLAN: [RoundPlan; 5] = [
         round_index: 4,
         burst_period: Duration::from_millis(10),
         packets_per_burst: 10,
+        duration: Duration::from_secs(5),
+    },
+    RoundPlan {
+        round_index: 5,
+        burst_period: Duration::from_millis(10),
+        packets_per_burst: 20,
+        duration: Duration::from_secs(5),
+    },
+    RoundPlan {
+        round_index: 6,
+        burst_period: Duration::from_millis(10),
+        packets_per_burst: 30,
         duration: Duration::from_secs(5),
     },
 ];
@@ -140,15 +152,22 @@ impl Sender {
         let mut errors = 0;
 
         while Instant::now() < end_time {
-            match self.send_packet_to_receiver() {
-                Ok(bytes_sent_in_this_packet) => {
-                    packets_sent += 1;
-                    bytes_sent += bytes_sent_in_this_packet as u64;
+            let burst_start_time = Instant::now();
+            for _i in 0..round_plan.packets_per_burst {
+                match self.send_packet_to_receiver() {
+                    Ok(bytes_sent_in_this_packet) => {
+                        packets_sent += 1;
+                        bytes_sent += bytes_sent_in_this_packet as u64;
+                    }
+                    Err(_) => {
+                        errors += 1;
+                    }
                 }
-                Err(e) => {
-                    warn!("Error! {:?}", e);
-                    errors += 1;
-                }
+            }
+            let now = Instant::now();
+            if now < burst_start_time + round_plan.burst_period {
+                let sleep_time = round_plan.burst_period - (Instant::now() - burst_start_time);
+                std::thread::sleep(sleep_time);
             }
         }
         RoundSenderResults {
