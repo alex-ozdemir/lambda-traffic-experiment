@@ -7,12 +7,15 @@ pub struct LambdaSenderStart {
     pub local_addr: SocketAddr,
     pub plan: experiment::ExperimentPlan,
     pub exp_id: u32,
+    pub first_packet_id: u64,
+    pub sender_id: u8,
+    pub n_senders: u8,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct LambdaReceiverStart {
     pub local_addr: SocketAddr,
-    pub sender_addr: SocketAddr,
+    pub sender_addrs: Vec<SocketAddr>,
     pub exp_id: u32,
     pub dummy_id: Option<u16>,
 }
@@ -51,12 +54,27 @@ pub mod experiment {
             packet_rates_per_ms: impl Iterator<Item = u16>,
         ) -> Self {
             ExperimentPlan {
-                rounds: packet_rates_per_ms.map(|c| RoundPlan {
-                    packets_per_ms: c,
-                    duration: duration.clone(),
-                    sleep_period: sleep_period.clone(),
-                }).collect(),
+                rounds: packet_rates_per_ms
+                    .map(|c| RoundPlan {
+                        packets_per_ms: c,
+                        duration: duration.clone(),
+                        sleep_period: sleep_period.clone(),
+                    })
+                    .collect(),
             }
+        }
+        pub fn with_range_of_counts(
+            sleep_period: Duration,
+            duration: Duration,
+            rounds: u8,
+            max_packets_per_ms: u16,
+        ) -> Self {
+            ExperimentPlan::with_varying_counts(
+                sleep_period,
+                duration,
+                (1..=rounds)
+                    .map(|i| ((i as u16 * max_packets_per_ms) as f64 / rounds as f64) as u16),
+            )
         }
     }
 
@@ -74,13 +92,13 @@ pub struct LambdaResult {}
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum LocalTCPMessage {
-    SenderPing(SocketAddr,String),
-    ReceiverPing(SocketAddr,String),
+    SenderPing(SocketAddr, String),
+    ReceiverPing(SocketAddr, String),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum LocalMessage {
-    DummyPing(SocketAddr,u16,String),
+    DummyPing(SocketAddr, u16, String),
     ReceiverStats {
         packet_count: u64,
         byte_count: u64,

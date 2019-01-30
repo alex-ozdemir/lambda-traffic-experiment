@@ -1,17 +1,23 @@
 #!/usr/bin/python
 
-import argparse
-import boto3
-import sys
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import cm
+
+import argparse
 import bisect
+import boto3
+import botocore
+import functools as ft
+import glob
 import os
 import os.path
-import string
 import random
-from matplotlib import cm
+import re
+import string
+import sys
+BUCKET_NAME = 'rust-test-2'
 
 def merge_experiments(e1, e2):
     s1_path = './data/sender-results-{}.csv'.format(e1)
@@ -51,11 +57,23 @@ def partition_packets(packets, bucket_ranges):
     packets.clear()
     return buckets
 
-def analyze(experiment, emit_csv=False):
-    send_res_path = './data/sender-results-{}.csv'.format(experiment)
+def open_sender_results(experiment):
+    data_glob = './data/sender-results-{}*.csv'.format(experiment)
+    files = glob.glob(data_glob)
+    if len(files) == 0:
+        print("Missing sender data: {}".format(data_glob))
+        sys.exit(2)
+    return pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+
+def open_receiver_results(experiment):
     rec_res_path = './data/receiver-results-{}.csv'.format(experiment)
-    send_res = pd.read_csv(send_res_path)
-    rec_res = pd.read_csv(rec_res_path)
+    return pd.read_csv(rec_res_path)
+
+
+def analyze(experiment, emit_csv=False):
+    send_res = open_sender_results(experiment)
+    rec_res = open_receiver_results(experiment)
+
     buckets = partition_packets(rec_res['packet_id'].tolist(), [
                                 (row.first_packet_id,
                                  row.first_packet_id + row.packets_sent)
@@ -76,7 +94,9 @@ def analyze(experiment, emit_csv=False):
 
     #send_res['label'] = ['{}p/ms {}ms'.format(row.packets_per_ms, int(row.sleep_period/10**6)) for i, row in send_res.iterrows()]
     #send_res['label'] = ['{}ms'.format(int(row.sleep_period/10**6)) for i, row in send_res.iterrows()]
-    send_res['label'] = ['{}p/ms'.format(int(row.packets_per_ms)) for i, row in send_res.iterrows()]
+    #send_res['label'] = ['{}p/ms'.format(int(row.packets_per_ms)) for i, row in send_res.iterrows()]
+    #send_res['label'] = ['{}'.format(int(row.sender_id)) for i, row in send_res.iterrows()]
+
 
     df = send_res
     if emit_csv:
@@ -94,17 +114,17 @@ def analyze(experiment, emit_csv=False):
             os.makedirs('tables')
         df2.to_csv('tables/{}.csv'.format(experiment), index_label='round_i')
     else:
-        print(df[[
-            'packets_per_ms',
-            'pause_ms',
-            'write %',
-            'real_dur_ms',
-            'rate_sent',
-            'rate_recv',
-            ]])
+        print(df)
+        df_with_plot_data = df[['packets_per_ms','sender_id','rate_recv','rate_sent']]
+        if len(set(df_with_plot_data.sender_id)) > 1:
+            grouped = df_with_plot_data.groupby(['packets_per_ms']).sum().reset_index()
+            grouped['sender_id'] = -1
+            df_with_plot_data = pd.concat([df_with_plot_data, grouped], ignore_index=True)
+        df_with_plot_data['label'] = ['Σ' if row.sender_id < 0 else str(int(row.sender_id)) for i, row in df_with_plot_data.iterrows()]
+        print(df_with_plot_data)
         fig, ax = plt.subplots()
         cmap = cm.get_cmap('Spectral')
-        df.plot(x='rate_sent',
+        df_with_plot_data.plot(x='rate_sent',
                 y='rate_recv',
                 c='packets_per_ms',
                 colormap='gnuplot',
@@ -114,7 +134,7 @@ def analyze(experiment, emit_csv=False):
                 s=40,
                 linewidth=2)
 
-        for k, v in df.iterrows():
+        for k, v in df_with_plot_data.iterrows():
             ax.annotate(v.label, (v.rate_sent, v.rate_recv),
                         xytext=(2, -10), textcoords='offset points',
                         family='monospace', fontsize=10, color='darkslategrey')
@@ -133,35 +153,70 @@ def analyze(experiment, emit_csv=False):
         # plt.savefig('out.png', dpi=600)
         plt.show()
 
+def ensure_sender_data_present(experiment):
+    data_path_glob = './data/sender-results-{}-*.csv'.format(experiment)
+    data_path_regex = './data/sender-results-{}-(\d+)-of-(\d+).csv'.format(experiment)
+    data_path_prefix = 'sender-results-{}-'.format(experiment)
+    files_that_match_glob = glob.glob(data_path_glob)
+    download = False
+    if len(files_that_match_glob) == 0:
+        download = True
+    else:
+        results = re.search(data_path_regex, files_that_match_glob[0])
+        assert results is not None
+        n_senders = int(results.group(2))
+        if len(files_that_match_glob) < n_senders:
+            download = True
+    if download:
+        s3 = boto3.client('s3')
+        resource = boto3.resource('s3')
+        try:
+            response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=data_path_prefix)
+            if 'Contents' not in response:
+                print("There is no receipt data for experiment {}.".format(experiment))
+                sys.exit(2)
+            prefixes = [res['Key'] for res in response['Contents']]
+            for (i, key) in enumerate(prefixes):
+                print('Downloading the sender data {}/{}'.format(i + 1, len(prefixes)))
+                try:
+                    target_path = './data/{}'.format(key)
+                    resource.Bucket(BUCKET_NAME).download_file(key, target_path)
+                except botocore.exceptions.ClientError as e:
+                    if e.response['Error']['Code'] == "404":
+                        print("There is no receipt data for sender {}.".format(i+1))
+                        sys.exit(2)
+                    else:
+                        raise
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == "404":
+                print("There is no receipt data for experiment {}.".format(experiment))
+                sys.exit(2)
+            else:
+                raise
+
+def ensure_receiver_data_present(experiment):
+    data_path = './data/receiver-results-{}.csv'.format(experiment)
+    data_filename = 'receiver-results-{}.csv'.format(experiment)
+    if not os.path.exists(data_path):
+        s3 = boto3.resource('s3')
+        try:
+            print('Fecthing the receiver results... This may be slow')
+            s3.Bucket(BUCKET_NAME).download_file(data_filename, data_path)
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == "404":
+                print("There is no receipt data for that experiment")
+            else:
+                raise
+
+
+
 def ensure_experiment_data_present(experiment):
-    send_res_path = './data/sender-results-{}.csv'.format(experiment)
-    rec_res_path = './data/receiver-results-{}.csv'.format(experiment)
-    send_s3_name = 'sender-results-{}.csv'.format(experiment)
-    rec_s3_name = 'receiver-results-{}.csv'.format(experiment)
-    BUCKET_NAME = 'test-rust-2'
     if os.path.exists('data') and not os.path.isdir('data'):
         raise Exception('Error! `data` exists bust is not a directory')
     if not os.path.isdir('data'):
         os.makedirs('data')
-    if not os.path.exists(send_res_path):
-        s3 = boto3.resource('s3')
-        try:
-            s3.Bucket(BUCKET_NAME).download_file(send_s3_name, send_res_path)
-        except botocore.exceptions.ClientError as e:
-            if e.response['Error']['Code'] == "404":
-                print("There is no send data for that experiment")
-            else:
-                raise
-    if not os.path.exists(rec_res_path):
-        s3 = boto3.resource('s3')
-        try:
-            print('Downloading the receipt data... This may take a while')
-            s3.Bucket(BUCKET_NAME).download_file(rec_s3_name, rec_res_path)
-        except botocore.exceptions.ClientError as e:
-            if e.response['Error']['Code'] == "404":
-                print("There is no receipt data for that experiment.")
-            else:
-                raise
+    ensure_sender_data_present(experiment)
+    ensure_receiver_data_present(experiment)
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze experiments")

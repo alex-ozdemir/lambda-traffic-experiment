@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 struct Receiver {
     socket: UdpSocket,
-    sender_addr: SocketAddr,
+    sender_addrs: Vec<SocketAddr>,
     next_sender_ping: Instant,
     last_packet_time: Option<Instant>,
     local_addr: SocketAddr,
@@ -67,7 +67,7 @@ impl Receiver {
         std::mem::drop(tcp);
         Ok(Receiver {
             socket,
-            sender_addr: start_command.sender_addr,
+            sender_addrs: start_command.sender_addrs,
             next_sender_ping: Instant::now(),
             local_addr: start_command.local_addr,
             received_packet_ids: Vec::new(),
@@ -81,9 +81,11 @@ impl Receiver {
     fn ping_sender_if_needed(&mut self) {
         if Instant::now() > self.next_sender_ping {
             info!("Sending data");
-            info!("Pinging sender {}", self.sender_addr);
-            let enc = bincode::serialize(&SenderMessage::ReceiverPing).unwrap();
-            self.socket.send_to(&enc, self.sender_addr).unwrap();
+            info!("Pinging senders {:?}", self.sender_addrs);
+            for sender_addr in &self.sender_addrs {
+                let enc = bincode::serialize(&SenderMessage::ReceiverPing).unwrap();
+                self.socket.send_to(&enc, *sender_addr).unwrap();
+            }
             info!("Pinging local {}", self.local_addr);
             let enc = bincode::serialize(&LocalMessage::ReceiverStats {
                 packet_count: self.received_packet_ids.len() as u64,

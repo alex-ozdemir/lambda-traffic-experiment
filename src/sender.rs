@@ -28,7 +28,7 @@ mod msg;
 mod net;
 
 use msg::experiment::{ExperimentPlan, RoundPlan, RoundSenderResults};
-use msg::{LambdaResult, LambdaSenderStart, LocalTCPMessage, LocalMessage, SenderMessage};
+use msg::{LambdaResult, LambdaSenderStart, LocalMessage, LocalTCPMessage, SenderMessage};
 
 static mut UDP_BUF: [u8; consts::UDP_PAYLOAD_BYTES] = [b'Q'; consts::UDP_PAYLOAD_BYTES];
 
@@ -73,7 +73,7 @@ impl Sender {
             socket,
             receiver_addr,
             local_addr: start_command.local_addr,
-            next_packet_id: 0,
+            next_packet_id: start_command.first_packet_id,
             plan: start_command.plan.clone(),
         })
     }
@@ -105,14 +105,14 @@ impl Sender {
         let mut write_time = Duration::from_nanos(0);
 
         let mut burst_start_time = Instant::now();
-    'round_loop:
-        loop {
+        'round_loop: loop {
             let elapsed_time = burst_start_time - round_start_time;
             if elapsed_time >= round_plan.duration {
                 break;
             }
 
-            let packet_count_target = elapsed_time.as_millis() as u64 * round_plan.packets_per_ms as u64;
+            let packet_count_target =
+                elapsed_time.as_millis() as u64 * round_plan.packets_per_ms as u64;
             let packets_behind = packet_count_target - packets_sent;
             for _i in 0..packets_behind {
                 match self.send_packet_to_receiver() {
@@ -133,7 +133,7 @@ impl Sender {
                     let now = Instant::now();
                     let elapsed = now - round_start_time;
                     if elapsed >= round_plan.duration {
-                        write_time += now -burst_start_time;
+                        write_time += now - burst_start_time;
                         break 'round_loop;
                     }
                 }
@@ -162,24 +162,31 @@ impl Sender {
         std::mem::replace(&mut self.plan.rounds, Vec::new())
             .into_iter()
             .map(|round_plan| {
+                let round_start_time = Instant::now();
                 self.send_to_master(&LocalMessage::StartRound(round_plan.clone()));
                 let round_result = self.run_round(&round_plan);
                 std::thread::sleep(Duration::from_millis(200));
                 self.send_to_master(&LocalMessage::FinishRound(round_result.clone()));
-                std::thread::sleep(Duration::from_secs(2));
+                let sleep_time = round_plan.duration + Duration::from_secs(2)
+                    - (Instant::now() - round_start_time);
+                std::thread::sleep(sleep_time);
                 round_result
             })
             .collect()
     }
 }
 
-fn format_results<'a>(results: impl Iterator<Item = &'a RoundSenderResults>) -> String {
+fn format_results<'a>(
+    results: impl Iterator<Item = &'a RoundSenderResults>,
+    sender_id: u8,
+) -> String {
     let mut formatted = String::new();
     write!(
         formatted,
-        "{},{},{},{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{},{},{},{},{},{}\n",
         "sleep_period",
         "packets_per_ms",
+        "sender_id",
         "duration",
         "first_packet_id",
         "packets_sent",
@@ -193,9 +200,10 @@ fn format_results<'a>(results: impl Iterator<Item = &'a RoundSenderResults>) -> 
     for res in results {
         write!(
             formatted,
-            "{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{}\n",
             res.plan.sleep_period.as_nanos(),
             res.plan.packets_per_ms,
+            sender_id,
             res.plan.duration.as_nanos(),
             res.first_packet_id,
             res.packets_sent,
@@ -215,10 +223,13 @@ fn my_handler(e: LambdaSenderStart, _c: lambda::Context) -> Result<LambdaResult,
 
     let exp_results = Sender::new(&e).unwrap().run_exp();
 
-    let formatted_results = format_results(exp_results.iter());
+    let formatted_results = format_results(exp_results.iter(), e.sender_id);
 
     let s3client = aws_s3::S3Client::new(aws::Region::UsWest2);
-    let object_name = format!("sender-results-{}.csv", e.exp_id);
+    let object_name = format!(
+        "sender-results-{}-{}-of-{}.csv",
+        e.exp_id, e.sender_id, e.n_senders
+    );
 
     s3client
         .put_object(aws_s3::PutObjectRequest {
