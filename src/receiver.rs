@@ -27,7 +27,7 @@ mod consts;
 mod msg;
 mod net;
 
-use msg::{LambdaReceiverStart, LambdaResult, LocalMessage, SenderMessage};
+use msg::{LambdaReceiverStart, LambdaResult, LocalTCPMessage, LocalMessage, SenderMessage};
 
 thread_local! {
     pub static UDP_BUF: RefCell<[u8; 5_000]> = RefCell::new([0; 5_000]);
@@ -56,9 +56,10 @@ impl Receiver {
     fn new(start_command: LambdaReceiverStart) -> Result<Self, Box<dyn Error>> {
         info!("Staring with invocation {:?}", start_command);
         let (socket, my_addr) = net::open_public_udp();
+        let my_machine_id = net::get_machine_id();
         let mut tcp = TcpStream::connect((start_command.local_addr.ip(), net::TCP_PORT)).unwrap();
         tcp.write_all(
-            bincode::serialize(&LocalMessage::ReceiverPing(my_addr))
+            bincode::serialize(&LocalTCPMessage::ReceiverPing(my_addr, my_machine_id))
                 .unwrap()
                 .as_slice(),
         )
@@ -79,8 +80,11 @@ impl Receiver {
 
     fn ping_sender_if_needed(&mut self) {
         if Instant::now() > self.next_sender_ping {
+            info!("Sending data");
+            info!("Pinging sender {}", self.sender_addr);
             let enc = bincode::serialize(&SenderMessage::ReceiverPing).unwrap();
             self.socket.send_to(&enc, self.sender_addr).unwrap();
+            info!("Pinging local {}", self.local_addr);
             let enc = bincode::serialize(&LocalMessage::ReceiverStats {
                 packet_count: self.received_packet_ids.len() as u64,
                 byte_count: self.received_bytes,
@@ -155,30 +159,21 @@ impl Receiver {
             .unwrap();
         info!("Done saving");
     }
-
-    fn stream_save_results(&mut self) {
-        info!("Going to save the results");
-        let s3client = aws_s3::S3Client::new(aws::Region::UsWest2);
-        let object_name = format!("receiver-results-{}.csv", self.exp_id);
-        let data = std::mem::replace(&mut self.received_packet_ids, Vec::new());
-        let data_stream =
-            futures::stream::iter_ok(data.into_iter().map(|id| format!("{}\n", id).into_bytes()));
-
-        s3client
-            .put_object(aws_s3::PutObjectRequest {
-                bucket: consts::S3_BUCKET.to_owned(),
-                key: object_name,
-                body: Some(aws::ByteStream::new(data_stream)),
-                ..aws_s3::PutObjectRequest::default()
-            })
-            .sync()
-            .unwrap();
-        info!("Done saving");
-    }
 }
 
 fn my_handler(e: LambdaReceiverStart, _c: lambda::Context) -> Result<LambdaResult, HandlerError> {
     info!("Lambda with event {:?} is alive", e);
+
+    if let Some(id) = e.dummy_id {
+        let (socket, my_addr) = net::open_public_udp();
+        let my_machine_id = net::get_machine_id();
+        let enc = bincode::serialize(&LocalMessage::DummyPing(my_addr, id, my_machine_id)).unwrap();
+        socket.send_to(&enc, e.local_addr).unwrap();
+
+        //std::thread::sleep(Duration::from_secs(20));
+
+        return Ok(LambdaResult {});
+    }
 
     let stop_time =
         Instant::now() + Duration::from_millis(_c.get_time_remaining_millis() as u64 - 10_000);

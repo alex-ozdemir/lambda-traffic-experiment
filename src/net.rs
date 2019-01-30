@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
 use std::net::{SocketAddr, UdpSocket};
+use std::io::Read;
 
-pub const UDP_PORT: u16 = 50000;
-pub const TCP_PORT: u16 = 50001;
+pub const UDP_PORT: u16 = 50001;
+pub const TCP_PORT: u16 = 50002;
 
 /// Create a UDP socker and determine it's public `SocketAddr`.
 pub fn open_public_udp() -> (UdpSocket, SocketAddr) {
@@ -32,4 +33,12 @@ pub fn open_public_udp() -> (UdpSocket, SocketAddr) {
         }
     }
     panic!();
+}
+
+pub fn get_machine_id() -> String {
+    let mut file = std::fs::File::open("/proc/sys/kernel/hostname").unwrap();
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).unwrap();
+    buf.retain(|b| *b != b'\n');
+    String::from_utf8(buf).unwrap()
 }
