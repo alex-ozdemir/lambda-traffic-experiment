@@ -18,6 +18,8 @@ pub struct LambdaReceiverStart {
     pub sender_addrs: Vec<SocketAddr>,
     pub exp_id: u32,
     pub dummy_id: Option<u16>,
+    pub receiver_id: u8,
+    pub n_receivers: u8,
 }
 
 pub mod experiment {
@@ -112,5 +114,5 @@ pub enum LocalMessage {
 pub enum SenderMessage {
     Die,
     ReceiverPing,
-    ReceiverAddr(SocketAddr),
+    ReceiverAddrs(Vec<SocketAddr>),
 }

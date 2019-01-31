@@ -27,7 +27,7 @@ mod consts;
 mod msg;
 mod net;
 
-use msg::{LambdaReceiverStart, LambdaResult, LocalTCPMessage, LocalMessage, SenderMessage};
+use msg::{LambdaReceiverStart, LambdaResult, LocalMessage, LocalTCPMessage, SenderMessage};
 
 thread_local! {
     pub static UDP_BUF: RefCell<[u8; 5_000]> = RefCell::new([0; 5_000]);
@@ -50,6 +50,8 @@ struct Receiver {
     received_bytes: u64,
     errors: u64,
     exp_id: u32,
+    receiver_id: u8,
+    n_receivers: u8,
 }
 
 impl Receiver {
@@ -75,6 +77,8 @@ impl Receiver {
             errors: 0,
             last_packet_time: None,
             exp_id: start_command.exp_id,
+            receiver_id: start_command.receiver_id,
+            n_receivers: start_command.n_receivers,
         })
     }
 
@@ -142,7 +146,10 @@ impl Receiver {
     fn save_results(&mut self) {
         info!("Going to save the results");
         let s3client = aws_s3::S3Client::new(aws::Region::UsWest2);
-        let object_name = format!("receiver-results-{}.csv", self.exp_id);
+        let object_name = format!(
+            "receiver-results-{}-{}-of-{}.csv",
+            self.exp_id, self.receiver_id, self.n_receivers
+        );
         let data = std::mem::replace(&mut self.received_packet_ids, Vec::new());
         let mut s = Vec::<u8>::new();
         write!(s, "packet_id\n").unwrap();
@@ -171,8 +178,6 @@ fn my_handler(e: LambdaReceiverStart, _c: lambda::Context) -> Result<LambdaResul
         let my_machine_id = net::get_machine_id();
         let enc = bincode::serialize(&LocalMessage::DummyPing(my_addr, id, my_machine_id)).unwrap();
         socket.send_to(&enc, e.local_addr).unwrap();
-
-        //std::thread::sleep(Duration::from_secs(20));
 
         return Ok(LambdaResult {});
     }

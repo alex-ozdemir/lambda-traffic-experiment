@@ -66,9 +66,12 @@ def open_sender_results(experiment):
     return pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
 
 def open_receiver_results(experiment):
-    rec_res_path = './data/receiver-results-{}.csv'.format(experiment)
-    return pd.read_csv(rec_res_path)
-
+    data_glob = './data/receiver-results-{}*.csv'.format(experiment)
+    files = glob.glob(data_glob)
+    if len(files) == 0:
+        print("Missing reciever data: {}".format(data_glob))
+        sys.exit(2)
+    return pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
 
 def analyze(experiment, emit_csv=False):
     send_res = open_sender_results(experiment)
@@ -173,7 +176,7 @@ def ensure_sender_data_present(experiment):
         try:
             response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=data_path_prefix)
             if 'Contents' not in response:
-                print("There is no receipt data for experiment {}.".format(experiment))
+                print("There is no send data for experiment {}.".format(experiment))
                 sys.exit(2)
             prefixes = [res['Key'] for res in response['Contents']]
             for (i, key) in enumerate(prefixes):
@@ -183,7 +186,48 @@ def ensure_sender_data_present(experiment):
                     resource.Bucket(BUCKET_NAME).download_file(key, target_path)
                 except botocore.exceptions.ClientError as e:
                     if e.response['Error']['Code'] == "404":
-                        print("There is no receipt data for sender {}.".format(i+1))
+                        print("There is no send data for sender {}.".format(i+1))
+                        sys.exit(2)
+                    else:
+                        raise
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == "404":
+                print("There is no send data for experiment {}.".format(experiment))
+                sys.exit(2)
+            else:
+                raise
+
+def ensure_receiver_data_present(experiment):
+    data_path_glob = './data/receiver-results-{}-*.csv'.format(experiment)
+    data_path_regex = './data/receiver-results-{}-(\d+)-of-(\d+).csv'.format(experiment)
+    data_path_prefix = 'receiver-results-{}-'.format(experiment)
+    files_that_match_glob = glob.glob(data_path_glob)
+    download = False
+    if len(files_that_match_glob) == 0:
+        download = True
+    else:
+        results = re.search(data_path_regex, files_that_match_glob[0])
+        assert results is not None
+        n_receivers = int(results.group(2))
+        if len(files_that_match_glob) < n_receivers:
+            download = True
+    if download:
+        s3 = boto3.client('s3')
+        resource = boto3.resource('s3')
+        try:
+            response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=data_path_prefix)
+            if 'Contents' not in response:
+                print("There is no receipt data for experiment {}.".format(experiment))
+                sys.exit(2)
+            prefixes = [res['Key'] for res in response['Contents']]
+            for (i, key) in enumerate(prefixes):
+                print('Downloading the receiver data {}/{}. This may be slow'.format(i + 1, len(prefixes)))
+                try:
+                    target_path = './data/{}'.format(key)
+                    resource.Bucket(BUCKET_NAME).download_file(key, target_path)
+                except botocore.exceptions.ClientError as e:
+                    if e.response['Error']['Code'] == "404":
+                        print("There is no receipt data for receiver {}.".format(i+1))
                         sys.exit(2)
                     else:
                         raise
@@ -191,20 +235,6 @@ def ensure_sender_data_present(experiment):
             if e.response['Error']['Code'] == "404":
                 print("There is no receipt data for experiment {}.".format(experiment))
                 sys.exit(2)
-            else:
-                raise
-
-def ensure_receiver_data_present(experiment):
-    data_path = './data/receiver-results-{}.csv'.format(experiment)
-    data_filename = 'receiver-results-{}.csv'.format(experiment)
-    if not os.path.exists(data_path):
-        s3 = boto3.resource('s3')
-        try:
-            print('Fecthing the receiver results... This may be slow')
-            s3.Bucket(BUCKET_NAME).download_file(data_filename, data_path)
-        except botocore.exceptions.ClientError as e:
-            if e.response['Error']['Code'] == "404":
-                print("There is no receipt data for that experiment")
             else:
                 raise
 

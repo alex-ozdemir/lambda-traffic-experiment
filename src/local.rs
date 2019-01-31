@@ -33,7 +33,7 @@ struct Local {
     running: Arc<AtomicBool>,
     exp_id: u32,
     sender_hosts: Vec<String>,
-    receiver_host: String,
+    receiver_hosts: Vec<String>,
 }
 
 impl Local {
@@ -42,7 +42,7 @@ impl Local {
         my_addr: SocketAddr,
         sender_addrs: &Vec<SocketAddr>,
         exp_id: u32,
-    ) {
+        ) {
         let n_dummies = 50;
         info!("Started {} dummies.", n_dummies);
         for dummy_id in 0..n_dummies {
@@ -51,6 +51,8 @@ impl Local {
                 sender_addrs: sender_addrs.clone(),
                 exp_id,
                 dummy_id: Some(dummy_id),
+                receiver_id: 0,
+                n_receivers: 0,
             };
             let lambda_status = l_client
                 .invoke(aws_lambda::InvocationRequest {
@@ -59,14 +61,14 @@ impl Local {
                     payload: Some(serde_json::to_vec(&start).unwrap()),
                     ..aws_lambda::InvocationRequest::default()
                 })
-                .sync()
+            .sync()
                 .unwrap();
             assert!(lambda_status.status_code.unwrap() == 202);
             trace!("Started dummy #{}", dummy_id);
         }
     }
 
-    fn new(n_senders: u8, plan: ExperimentPlan) -> Result<Self, Box<dyn Error>> {
+    fn new(n_senders: u8, n_receivers: u8, plan: ExperimentPlan) -> Self {
         let packet_upper_bound = plan
             .rounds
             .iter()
@@ -80,9 +82,8 @@ impl Local {
         info!("Making lambda client");
         let mut client = aws_lambda::LambdaClient::new(aws::Region::UsWest2);
 
-        let mut sender_connections: Vec<(SocketAddr, TcpStream, String)> = (0..n_senders)
+        let mut sender_connections: Vec<(SocketAddr, TcpStream, String)> = (1..=n_senders)
             .map(|i| {
-                info!("Starting sender");
                 let start = LambdaSenderStart {
                     local_addr: my_addr,
                     exp_id,
@@ -98,10 +99,10 @@ impl Local {
                         payload: Some(serde_json::to_vec(&start).unwrap()),
                         ..aws_lambda::InvocationRequest::default()
                     })
-                    .sync()
+                .sync()
                     .unwrap();
                 assert!(lambda_status.status_code.unwrap() == 202);
-                info!("Waiting for sender #{}/{}", i+1, n_senders);
+                info!("Waiting for sender #{}/{}", i, n_senders);
                 let (mut stream, tcp_addr) = tcp_socket.accept().unwrap();
                 info!("Sender TCP addr {:?}", tcp_addr);
                 let mut data = [0; 1000];
@@ -112,7 +113,7 @@ impl Local {
                     _ => panic!("Expected the sender's address"),
                 }
             })
-            .collect();
+        .collect();
 
         let sender_addrs: Vec<_> = sender_connections
             .iter()
@@ -126,13 +127,14 @@ impl Local {
 
         Local::invoke_dummies(&mut client, my_addr, &sender_addrs, exp_id);
 
-        let (receiver_addr, receiver_host) = {
-            info!("Starting receiver");
+        let receiver_infos: Vec<(SocketAddr, String)> = (1..=n_receivers).map(|i| {
             let start = LambdaReceiverStart {
                 local_addr: my_addr,
                 sender_addrs: sender_addrs.clone(),
                 exp_id,
                 dummy_id: None,
+                receiver_id: i,
+                n_receivers,
             };
             let lambda_status = client
                 .invoke(aws_lambda::InvocationRequest {
@@ -141,9 +143,9 @@ impl Local {
                     payload: Some(serde_json::to_vec(&start).unwrap()),
                     ..aws_lambda::InvocationRequest::default()
                 })
-                .sync()?;
+            .sync().unwrap();
             assert!(lambda_status.status_code.unwrap() == 202);
-            info!("Waiting for receiver");
+            info!("Waiting for receiver {}/{}", i, n_receivers);
             let (mut stream, tcp_addr) = tcp_socket.accept().unwrap();
             info!("Receiver TCP addr {:?}", tcp_addr);
             let mut data = [0; 1000];
@@ -155,20 +157,23 @@ impl Local {
                 LocalTCPMessage::ReceiverPing(addr, id) => (addr, id),
                 _ => panic!("Expected the receiver's address"),
             }
-        };
+        }).collect();
+        let (receiver_addrs, receiver_hosts): (Vec<_>, Vec<_>) = receiver_infos
+            .into_iter().unzip();
 
         // Send the receiver address to each sender.
         sender_connections
             .iter_mut()
-            .map(|(_, stream, _)| {
+            .map(|(addr, stream, _)| {
+                info!("Posting receiver addresses to sender {}", addr);
                 stream
                     .write_all(
-                        &bincode::serialize(&SenderMessage::ReceiverAddr(receiver_addr)).unwrap(),
-                    )
+                        &bincode::serialize(&SenderMessage::ReceiverAddrs(receiver_addrs.clone())).unwrap(),
+                        )
                     .expect("Could not write receiver_addr to sender");
                 stream.flush().unwrap();
             })
-            .count();
+        .count();
 
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
@@ -178,14 +183,14 @@ impl Local {
         })
         .expect("Error setting Ctrl-C handler");
 
-        Ok(Local {
+        Local {
             socket,
             running,
             sender_addrs,
             exp_id,
             sender_hosts,
-            receiver_host,
-        })
+            receiver_hosts,
+        }
     }
 
     fn poll_socket(&mut self) {
@@ -195,37 +200,37 @@ impl Local {
                 e.kind() == std::io::ErrorKind::WouldBlock,
                 "Socket error {:?}",
                 e
-            ),
-            Ok((size, _source_addr)) => {
-                let message = bincode::deserialize(&udp_buf[..size])
-                    .expect("Couldn't parse message from worker");
-                match message {
-                    LocalMessage::DummyPing(addr, dummy_id, machine_id) => {
-                        trace!(
-                            "Dummy #{} on machine {} @ address {} pinged",
-                            dummy_id,
-                            machine_id,
-                            addr
-                        );
-                    }
-                    LocalMessage::StartRound(plan) => {
-                        info!("Starting round: {:#?}", plan);
-                    }
-                    LocalMessage::FinishRound(result) => {
-                        info!("Finished round: {:#?}", result);
-                    }
-                    LocalMessage::ReceiverStats {
-                        byte_count,
-                        packet_count,
-                        errors,
-                    } => {
-                        info!(
-                            "Received{:12} bytes in{:9} packets.{:9} errors.",
-                            byte_count, packet_count, errors,
-                        );
+                ),
+                Ok((size, _source_addr)) => {
+                    let message = bincode::deserialize(&udp_buf[..size])
+                        .expect("Couldn't parse message from worker");
+                    match message {
+                        LocalMessage::DummyPing(addr, dummy_id, machine_id) => {
+                            trace!(
+                                "Dummy #{} on machine {} @ address {} pinged",
+                                dummy_id,
+                                machine_id,
+                                addr
+                                );
+                        }
+                        LocalMessage::StartRound(plan) => {
+                            info!("Starting round: {:#?}", plan);
+                        }
+                        LocalMessage::FinishRound(result) => {
+                            info!("Finished round: {:#?}", result);
+                        }
+                        LocalMessage::ReceiverStats {
+                            byte_count,
+                            packet_count,
+                            errors,
+                        } => {
+                            info!(
+                                "Received{:12} bytes in{:9} packets.{:9} errors.",
+                                byte_count, packet_count, errors,
+                                );
+                        }
                     }
                 }
-            }
         }
     }
 
@@ -236,14 +241,14 @@ impl Local {
                     .send_to(
                         bincode::serialize(&SenderMessage::Die).unwrap().as_slice(),
                         sender_addr,
-                    )
+                        )
                     .unwrap();
             }
             info!("Experiment {} conluding", self.exp_id);
             info!(
-                "Sender hosts {:?}, receiver host: {}",
-                self.sender_hosts, self.receiver_host
-            );
+                "Sender hosts {:?}, receiver hosts: {:?}",
+                self.sender_hosts, self.receiver_hosts
+                );
             std::process::exit(2)
         }
     }
@@ -265,7 +270,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Duration::from_secs(args.flag_duration as u64),
         args.flag_rounds,
         args.flag_packets);
-    Local::new(args.arg_senders, plan)?.run_forever();
+    Local::new(args.arg_senders, args.arg_receivers, plan).run_forever();
 
     Ok(())
 }

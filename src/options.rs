@@ -4,11 +4,12 @@ const USAGE: &'static str = "
 Lambda Traffic Experiment
 
 Usage:
-  local [options] <senders>
+  local [options] <senders> <receivers>
   local (-h | --help)
 
 Arguments:
   senders             the number of senders to create
+  receivers           the number of receivers to create
 
 Options:
   -h --help         Show this screen.
@@ -23,6 +24,7 @@ Options:
 #[derive(Debug, Deserialize)]
 pub struct Args {
     pub arg_senders: u8,
+    pub arg_receivers: u8,
     pub flag_rounds: u8,
     pub flag_packets: u16,
     pub flag_sleep: u16,

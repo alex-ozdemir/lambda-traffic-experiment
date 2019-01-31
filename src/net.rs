@@ -3,7 +3,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::io::Read;
 
-pub const UDP_PORT: u16 = 50001;
+pub const UDP_PORT: u16 = 50003;
 pub const TCP_PORT: u16 = 50002;
 
 /// Create a UDP socker and determine it's public `SocketAddr`.

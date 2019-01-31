@@ -21,6 +21,7 @@ use std::error::Error;
 use std::fmt::Write as FmtWrite;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 mod consts;
@@ -30,7 +31,9 @@ mod net;
 use msg::experiment::{ExperimentPlan, RoundPlan, RoundSenderResults};
 use msg::{LambdaResult, LambdaSenderStart, LocalMessage, LocalTCPMessage, SenderMessage};
 
-static mut UDP_BUF: [u8; consts::UDP_PAYLOAD_BYTES] = [b'Q'; consts::UDP_PAYLOAD_BYTES];
+thread_local! {
+    pub static UDP_BUF: RefCell<[u8; consts::UDP_PAYLOAD_BYTES]> = RefCell::new([b'Q'; consts::UDP_PAYLOAD_BYTES]);
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     simple_logger::init_with_level(log::Level::Info)?;
@@ -41,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 struct Sender {
     socket: UdpSocket,
-    receiver_addr: SocketAddr,
+    receiver_addrs: Vec<SocketAddr>,
     local_addr: SocketAddr,
     next_packet_id: u64,
     plan: ExperimentPlan,
@@ -60,18 +63,19 @@ impl Sender {
         )
         .unwrap();
         tcp.flush().unwrap();
-        let receiver_addr = {
+        let receiver_addrs = {
             let mut data = Vec::new();
             tcp.read_to_end(&mut data).unwrap();
             match bincode::deserialize(&data).unwrap() {
-                SenderMessage::ReceiverAddr(addr) => (addr),
-                _ => panic!("Expected the sender's address"),
+                SenderMessage::ReceiverAddrs(addrs) => (addrs),
+                _ => panic!("Expected the senders' addresses"),
             }
         };
+        assert!(receiver_addrs.len() > 0);
         std::mem::drop(tcp);
         Ok(Sender {
             socket,
-            receiver_addr,
+            receiver_addrs,
             local_addr: start_command.local_addr,
             next_packet_id: start_command.first_packet_id,
             plan: start_command.plan.clone(),
@@ -79,14 +83,16 @@ impl Sender {
     }
 
     fn send_packet_to_receiver(&mut self) -> io::Result<usize> {
-        unsafe {
-            let mut buf_writer: &mut [u8] = &mut UDP_BUF;
+        let receiver_addr = self.receiver_addrs[(self.next_packet_id % self.receiver_addrs.len() as u64) as usize];
+        UDP_BUF.with(|b| {
+            let udp_buf: &mut [u8; consts::UDP_PAYLOAD_BYTES] = &mut b.borrow_mut();
+            let mut buf_writer: &mut [u8] = udp_buf;
             buf_writer
                 .write_u64::<NativeEndian>(self.next_packet_id)
                 .unwrap();
             self.next_packet_id += 1;
-            self.socket.send_to(&UDP_BUF, self.receiver_addr)
-        }
+            self.socket.send_to(udp_buf, receiver_addr)
+        })
     }
 
     fn send_to_master(&mut self, msg: &LocalMessage) {
