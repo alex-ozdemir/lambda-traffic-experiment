@@ -114,15 +114,15 @@ def analyze(experiment, emit_csv=False):
                 s=40,
                 linewidth=2)
 
-        for k, v in df.iterrows():
-            ax.annotate(v.label, (v.rate_sent, v.rate_recv),
-                        xytext=(2, -10), textcoords='offset points',
-                        family='monospace', fontsize=10, color='darkslategrey')
+        # for k, v in df.iterrows():
+        #     ax.annotate(v.label, (v.rate_sent, v.rate_recv),
+        #                 xytext=(2, -10), textcoords='offset points',
+        #                 family='monospace', fontsize=10, color='darkslategrey')
         plt.xlabel('Sent (Mb/s)')
         plt.ylabel('Received (Mb/s)')
         plt.xlim(left=-0.15)
         plt.ylim(bottom=-0.15)
-        plt.title('Traffic')
+        plt.title('Traffic Between Two λ Instances')
 
         lims = [
             0,
@@ -130,6 +130,7 @@ def analyze(experiment, emit_csv=False):
         ]
 
         ax.plot(lims, lims, 'k-', linewidth=0.25, alpha=0.75, zorder=0)
+        plt.savefig('1by1-uncongested.pdf')
         # plt.savefig('out.png', dpi=600)
         plt.show()
 
