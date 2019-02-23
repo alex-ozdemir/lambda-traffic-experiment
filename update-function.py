@@ -66,6 +66,7 @@ def main():
     args = parser.parse_args()
     update_binary('sender')
     update_binary('receiver')
+    update_binary('complete-remote')
 
 
 if __name__ == '__main__':
