@@ -43,9 +43,9 @@ impl Progress {
         let pb = ProgressBar::new(expected_duration.as_millis() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-            .template("[{elapsed}] {wide_bar:.blue/cyan} Estimate: {eta}")
-            .progress_chars("##-"),
-            );
+                .template("[{elapsed}] {wide_bar:.blue/cyan} Estimate: {eta}")
+                .progress_chars("##-"),
+        );
         Self {
             start_time: now,
             last_update: now,
@@ -99,7 +99,7 @@ impl Local {
                     payload: Some(serde_json::to_vec(&start).unwrap()),
                     ..aws_lambda::InvocationRequest::default()
                 })
-            .sync()
+                .sync()
                 .unwrap();
             assert!(lambda_status.status_code.unwrap() == 202);
         }
@@ -118,7 +118,7 @@ impl Local {
                     _ => panic!("Expected the remote's address"),
                 }
             })
-        .collect();
+            .collect();
 
         let remote_addrs: BTreeMap<_, _> = remotes
             .iter()
@@ -133,17 +133,20 @@ impl Local {
                 stream
                     .write_all(
                         &bincode::serialize(&RemoteTcpMessage::AllAddrs(remote_addrs.clone()))
-                        .unwrap(),
-                        )
+                            .unwrap(),
+                    )
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
                 stream
                     .flush()
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
                 stream.set_nonblocking(true).unwrap();
             })
-        .count();
+            .count();
         {
             let mut unconfirmed: BTreeSet<_> = remotes.keys().cloned().collect();
+            let mut contact_times: BTreeMap<_, _> =
+                remotes.keys().map(|i| (*i, Instant::now())).collect();
+            let mut status_t = Instant::now();
             println!(
                 "Waiting for {} workers to confirm connections",
                 unconfirmed.len()
@@ -154,7 +157,7 @@ impl Local {
                     println!("{} {}", id, log);
                     (*id, log.clone())
                 })
-            .collect::<BTreeMap<_, _>>();
+                .collect::<BTreeMap<_, _>>();
             while !unconfirmed.is_empty() {
                 for (id, (_, ref mut stream, _)) in &mut remotes {
                     let mut data = [0; 1400];
@@ -168,8 +171,8 @@ impl Local {
                             }
                         }
                     };
-                    match bincode::deserialize(&data[..bytes]).unwrap() {
-                        LocalTcpMessage::AllConfirmed => {
+                    match bincode::deserialize(&data[..bytes]) {
+                        Ok(LocalTcpMessage::AllConfirmed) => {
                             unconfirmed.remove(id);
                             println!(
                                 "Waiting for {} workers to confirm connections",
@@ -181,13 +184,31 @@ impl Local {
                                 }
                             }
                         }
-                        LocalTcpMessage::Error(s) => {
+                        Ok(LocalTcpMessage::Confirming(id, _cf)) => {
+                            *contact_times.get_mut(&id).unwrap() = Instant::now();
+                        }
+                        Ok(LocalTcpMessage::Error(s)) => {
                             panic!("Got an error during peer setup: '{}'", s);
                         }
-                        e => panic!("Expected the remotes to confirm peers, got {:?}", e),
+                        e => panic!(
+                            "Expected the remotes to confirm peers, got {:?} from {}",
+                            e, id
+                        ),
                     }
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                if status_t.elapsed() >= Duration::from_secs(1) {
+                    let now = Instant::now();
+                    status_t = now;
+                    for id in contact_times.keys() {
+                        print!("{:5} ", id);
+                    }
+                    println!();
+                    for t in contact_times.values() {
+                        print!("{:5} ", (now - *t).as_millis());
+                    }
+                    println!();
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
 
@@ -202,7 +223,7 @@ impl Local {
                     .flush()
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
             })
-        .count();
+            .count();
 
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
@@ -218,7 +239,8 @@ impl Local {
             .map(|round| round.duration + round.pause)
             .sum();
         let est_time =
-            Duration::from_millis((estimated_round_time.as_millis() as f64 * 1.1) as u64);
+            Duration::from_millis((estimated_round_time.as_millis() as f64 * 1.1) as u64)
+                + Duration::from_secs(4);
 
         Local {
             remotes,
@@ -290,7 +312,7 @@ impl Local {
                         .flush()
                         .unwrap_or_else(|_| panic!("Could not send die to {}", id));
                 })
-            .count();
+                .count();
             println!("Experiment {} conluding", self.exp_name);
             std::process::exit(2)
         }
@@ -310,29 +332,34 @@ impl Local {
 fn main() -> Result<(), Box<dyn Error>> {
     simple_logger::init_with_level(log::Level::Info).unwrap();
     let args = options::parse_args();
-    let plan = ExperimentPlan::with_range_of_counts(
+    let rounds = msg::experiment::rounds_with_range_of_counts(
         Duration::from_secs(args.flag_duration as u64),
         Duration::from_secs(args.flag_sleep as u64),
         args.flag_rounds,
         args.flag_packets,
-        );
-//    let plan = ExperimentPlan::with_varying_counts(
-//        Duration::from_secs(2),
-//        Duration::from_secs(2),
-//        vec![1,3,9,27].into_iter());
+    );
+    let plan = ExperimentPlan {
+        rounds,
+        recipients: msg::experiment::recipients_complete(args.arg_remotes),
+    };
     println!("Plan: {:#?}", plan);
     let mut local = Local::new(
         args.arg_remotes,
         args.flag_port,
         args.arg_exp_name.clone(),
         plan.clone(),
-        );
+    );
     local.run_till_results();
     let durations_and_rates = plan
         .rounds
         .iter()
         .enumerate()
-        .map(|(i, rd)| (i as u16, (rd.duration.as_millis() as f64 / 1000.0, rd.packets_per_ms)))
+        .map(|(i, rd)| {
+            (
+                i as u16,
+                (rd.duration.as_millis() as f64 / 1000.0, rd.packets_per_ms),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let mut d: BTreeMap<(RoundId, RemoteId, RemoteId), (TrafficData, TrafficData, f64, u16)> =
         BTreeMap::new();
@@ -341,30 +368,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             for (r, t) in &sr.data_by_receiver {
                 d.entry((sr.round_id, sr.remote_id, *r))
                     .or_insert_with(|| {
-                        let (d, r) =
-                            *durations_and_rates.get(&sr.round_id).unwrap();
-                            (
-                                TrafficData::new(),
-                                TrafficData::new(),
-                                d,r
-                            )
+                        let (d, r) = *durations_and_rates.get(&sr.round_id).unwrap();
+                        (TrafficData::new(), TrafficData::new(), d, r)
                     })
-                .0 = t.clone();
+                    .0 = t.clone();
             }
         }
         for rr in rrs {
             for (s, t) in &rr.data_by_sender {
                 d.entry((rr.round_id, *s, rr.remote_id))
                     .or_insert_with(|| {
-                        let (d, r) =
-                            *durations_and_rates.get(&rr.round_id).unwrap();
-                            (
-                                TrafficData::new(),
-                                TrafficData::new(),
-                                d,r
-                            )
+                        let (d, r) = *durations_and_rates.get(&rr.round_id).unwrap();
+                        (TrafficData::new(), TrafficData::new(), d, r)
                     })
-                .1 = t.clone();
+                    .1 = t.clone();
             }
         }
     }
@@ -374,14 +391,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut f,
         "round,secs,rate,from,to,bytes_s,bytes_r,packets_s,packets_r"
     )
-        .unwrap();
+    .unwrap();
     for ((rd, from, to), (t_s, t_r, dur, rt)) in d {
         writeln!(
             &mut f,
             "{},{},{},{},{},{},{},{},{}",
             rd, dur, rt, from, to, t_s.bytes, t_r.bytes, t_s.packets, t_r.packets,
-            )
-            .unwrap()
+        )
+        .unwrap()
     }
 
     Ok(())
