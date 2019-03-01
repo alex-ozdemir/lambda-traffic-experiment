@@ -18,15 +18,17 @@ use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::io::{self, Read, Write};
+use std::io;
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
 mod msg;
 mod net;
 
+use net::{ReadResult, TcpMsgStream};
+
 use msg::experiment::{RoundPlan, RoundReceiverResults, RoundSenderResults};
-use msg::{LambdaResult, LambdaStart, LocalTcpMessage, RemoteId, RemoteTcpMessage, RoundId};
+use msg::{LambdaResult, LambdaStart, LocalTcpMessage, RemoteId, RemoteTcpMessage, RoundId, StateUpdate};
 pub const UDP_PAYLOAD_BYTES: usize = 1372; // For an IP packet of size 1400
 
 thread_local! {
@@ -236,6 +238,7 @@ struct ExperimentProgress {
     round_start: Instant,
     round_end: Instant,
     packets_this_round: u64,
+    packets_r_this_round: u64,
     packets_per_ms: u16,
     round_plans: Vec<RoundPlan>,
 }
@@ -251,6 +254,7 @@ impl ExperimentProgress {
             round_start: Instant::now(),
             round_end: Instant::now(),
             packets_this_round: 0,
+            packets_r_this_round: 0,
             packets_per_ms: round_plans[0].packets_per_ms,
             round_plans,
         }
@@ -261,7 +265,7 @@ struct Remote {
     puncher: UdpPuncher,
     recipients: Vec<RemoteId>,
     upstream: Vec<RemoteId>,
-    local_connection: TcpStream,
+    local_connection: TcpMsgStream,
     remote_id: RemoteId,
     progress: ExperimentProgress,
     state: RemoteState,
@@ -281,34 +285,22 @@ impl Remote {
         info!("Starting with invocation {:?}", start);
         let (socket, my_addr) = net::open_public_udp(start.port);
         let remote_id = start.remote_id;
-        let mut tcp = TcpStream::connect(start.local_addr).unwrap();
+        let tcp = TcpStream::connect(start.local_addr).unwrap();
+        let mut tcp = TcpMsgStream::new(tcp);
         info!("Connected to the master");
-        tcp.write_all(
-            bincode::serialize(&LocalTcpMessage::MyAddress(
-                my_addr,
-                start.remote_id,
-                c.log_stream_name,
-            ))
-            .unwrap()
-            .as_slice(),
-        )
+        tcp.send(&LocalTcpMessage::MyAddress(
+            my_addr,
+            start.remote_id,
+            c.log_stream_name,
+        ))
         .unwrap();
-        tcp.flush().unwrap();
 
         let addr_map = {
-            let mut data = [b' '; 100000];
-            let mut bytes = 0;
-            loop {
-                bytes += tcp.read(&mut data[bytes..]).unwrap();
-                match bincode::deserialize(&data[..bytes]) {
-                    Ok(RemoteTcpMessage::AllAddrs(addrs)) => {
-                        break addrs;
-                    }
-                    Err(_) => info!(
-                        "Read {} bytes worth of addresses, but still need more.",
-                        bytes
-                    ),
-                    _ => panic!("Expected the senders' addresses"),
+            info!("Getting addresses");
+            match tcp.read::<RemoteTcpMessage>(true).unwrap() {
+                ReadResult::Data(RemoteTcpMessage::AllAddrs(addrs)) => addrs,
+                other => {
+                    panic!("Expected addrs, found {:?}", other);
                 }
             }
         };
@@ -324,8 +316,6 @@ impl Remote {
         let recipients: Vec<RemoteId> = to_connect.iter().cloned().collect();
         let upstream: Vec<RemoteId> = to_accept.iter().cloned().collect();
         let puncher = UdpPuncher::new(socket, remote_id, addr_map, to_connect, to_accept);
-
-        tcp.set_nonblocking(true).unwrap();
 
         let progress = ExperimentProgress::new(remote_id, start.plan.rounds);
         Remote {
@@ -367,34 +357,20 @@ impl Remote {
     }
 
     fn read_local(&mut self) -> io::Result<Option<RemoteTcpMessage>> {
-        let mut data = [b' '; 1000];
-        self.local_connection
-            .read(&mut data)
-            .map(Some)
-            .or_else(noneify_would_block)
-            .and_then(|bytes| match bytes {
-                Some(0) => {
-                    info!("0 byte read");
-                    Ok(None)
-                }
-                Some(b) => bincode::deserialize(&data[..b])
-                    .map_err(|e| {
-                        mk_err(format!(
-                            "Local deser: {} on {} bytes: {:?}",
-                            e,
-                            b,
-                            &data[..b]
-                        ))
-                    })
-                    .map(Some),
-                None => Ok(None),
-            })
+        match self
+            .local_connection
+            .read::<RemoteTcpMessage>(false)
+            .map_err(mk_err)?
+        {
+            ReadResult::WouldBlock => Ok(None),
+            ReadResult::EOF => Err(mk_err(format!("Master connection closed"))),
+            ReadResult::Data(t) => Ok(Some(t)),
+        }
     }
 
     fn send_to_master(&mut self, msg: &LocalTcpMessage) -> io::Result<()> {
         info!("Sending {:?} to master", msg);
-        let enc = bincode::serialize(msg).unwrap();
-        self.local_connection.write_all(&enc).map(|_| ())
+        self.local_connection.send(&msg)
     }
 
     fn read_all_packets(&mut self) -> io::Result<()> {
@@ -408,6 +384,7 @@ impl Remote {
                         .get_mut(&from)
                         .unwrap();
                     traffic.packets += 1;
+                    self.progress.packets_r_this_round += 1;
                     traffic.bytes += (size + 28) as u64;
                     Ok(())
                 } else {
@@ -445,15 +422,6 @@ impl Remote {
                         &self.upstream,
                     );
                     self.state = RemoteState::WaitForStart;
-                } else {
-                    if self.last_local_time.elapsed() >= Duration::from_secs(1) {
-                        self.last_local_time = Instant::now();
-                        let unconfirmed = self.puncher.to_accept.iter().next().unwrap();
-                        self.send_to_master(&LocalTcpMessage::Confirming(
-                            self.remote_id,
-                            *unconfirmed,
-                        ))?;
-                    }
                 }
                 Ok(Some(Duration::from_millis(10)))
             }
@@ -467,6 +435,7 @@ impl Remote {
                     self.progress.round_end =
                         self.progress.round_start + self.progress.round_plans[0].duration;
                     self.progress.packets_this_round = 0;
+                    self.progress.packets_r_this_round = 0;
                     self.state = RemoteState::Receive;
                     Ok(None)
                 }
@@ -525,6 +494,7 @@ impl Remote {
                             return Err(mk_err(format!("Done")));
                         }
                         self.progress.packets_this_round = 0;
+                        self.progress.packets_r_this_round = 0;
                         self.progress.round_end = self.progress.round_start
                             + self.progress.round_plans[self.progress.round_id as usize].duration;
                     }
@@ -546,6 +516,25 @@ impl Remote {
                 .ok();
                 return;
             }
+            if self.last_local_time.elapsed() >= Duration::from_secs(1) {
+                self.last_local_time = Instant::now();
+                let update = match self.state {
+                    RemoteState::Establish => StateUpdate::Connecting {
+                        unconnected: self.puncher.to_accept.len() as u16,
+                        desired: self.upstream.len() as u16,
+                    },
+                    RemoteState::Receive | RemoteState::Send => StateUpdate::InRound {
+                        id: self.progress.round_id,
+                        packets_r: self.progress.packets_r_this_round,
+                        packets_s: self.progress.packets_this_round,
+                    },
+                    RemoteState::WaitForStart => StateUpdate::Connected,
+                };
+                info!(
+                    "Local update: {:?}",
+                    self.send_to_master(&LocalTcpMessage::State(update))
+                );
+            }
             match self.step() {
                 Ok(Some(sleep_time)) => {
                     std::thread::sleep(sleep_time);
@@ -557,11 +546,10 @@ impl Remote {
                         let rr =
                             std::mem::replace(&mut self.progress.all_receive_results, Vec::new());
                         info!("Done: {:?}", (&sr, &rr));
-                        self.local_connection.set_nonblocking(false).unwrap();
-                        self.send_to_master(&LocalTcpMessage::Stats(sr, rr)).ok();
-                        self.local_connection.flush().unwrap();
+                        let sr = self.send_to_master(&LocalTcpMessage::Stats(sr, rr));
+                        info!("Send result: {:?}", sr);
                         std::thread::sleep(Duration::from_secs(
-                            self.progress.round_plans.len() as u64
+                            4 * self.progress.round_plans.len() as u64,
                         )); // Just in case
                         return; // Done
                     }

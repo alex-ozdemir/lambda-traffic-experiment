@@ -42,6 +42,7 @@ pub struct TcpMsgStream {
     size: usize,
 }
 
+#[derive(Debug)]
 pub enum ReadResult<T> {
     WouldBlock,
     EOF,
@@ -64,41 +65,51 @@ impl TcpMsgStream {
     // Returns `false` if the stream is closed
     // Otherwise return `true`, and the size is in the buf.
     // If `block` is true, then will never return WouldBlock.
-    pub fn read_at_least(&mut self, target: usize, block: bool) -> io::Result<bool> {
+    fn read_at_least(&mut self, target: usize, block: bool) -> io::Result<bool> {
+        if block {
+            self.inner.set_nonblocking(false).unwrap();
+        }
         if self.buf.len() < target {
             self.buf.resize(target, 0);
         }
         while self.size < target {
             match self.inner.read(&mut self.buf[self.size..]) {
                 Err(e) => {
-                    if e.kind() == io::ErrorKind::WouldBlock && !block {
+                    if e.kind() == io::ErrorKind::WouldBlock {
                         if self.size == 0 {
+                            self.inner.set_nonblocking(true).unwrap();
                             return Err(e);
                         } else {
                             continue;
                         }
                     } else {
+                        self.inner.set_nonblocking(true).unwrap();
                         return Err(e);
                     }
                 }
-                Ok(0) => return Ok(false),
+                Ok(0) => {
+                    self.inner.set_nonblocking(true).unwrap();
+                    return Ok(false)
+                }
                 Ok(n) => {
                     self.size += n;
                 }
             }
         }
+        self.inner.set_nonblocking(true).unwrap();
         return Ok(true);
     }
 
-    pub fn clear_bytes(&mut self, n: usize) {
+    fn clear_bytes(&mut self, n: usize) {
         let to_clear = std::cmp::min(n, self.size);
         self.buf.drain(..to_clear);
+        self.size -= to_clear;
     }
 
-    pub fn read<D: DeserializeOwned>(&mut self) -> Result<ReadResult<D>, String> {
+    pub fn read<D: DeserializeOwned>(&mut self, block: bool) -> Result<ReadResult<D>, String> {
         use byteorder::ReadBytesExt;
         // Get the message size
-        match self.read_at_least(8, false) {
+        match self.read_at_least(8, block) {
             Ok(false) => return Ok(ReadResult::EOF),
             Ok(true) => {}
             Err(e) => {
@@ -130,11 +141,13 @@ impl TcpMsgStream {
         use byteorder::WriteBytesExt;
         // Get the message size
         let mut data = Vec::new();
-        data.write_u64::<byteorder::NetworkEndian>(bincode::serialized_size(msg).unwrap() as u64)
+        let s = bincode::serialized_size(msg).unwrap() as u64;
+        data.write_u64::<byteorder::NetworkEndian>(s)
             .unwrap();
         bincode::serialize_into(&mut data, msg).unwrap();
         self.inner.set_nonblocking(false).unwrap();
         self.inner.write_all(data.as_slice())?;
+        self.inner.flush()?;
         self.inner.set_nonblocking(true).unwrap();
         Ok(())
     }

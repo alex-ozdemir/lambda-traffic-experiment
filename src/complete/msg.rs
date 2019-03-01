@@ -128,10 +128,24 @@ pub struct LambdaResult {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
+pub enum StateUpdate {
+    Connecting {
+        unconnected: u16,
+        desired: u16,
+    },
+    Connected,
+    InRound {
+        id: RoundId,
+        packets_s: u64,
+        packets_r: u64,
+    },
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum LocalTcpMessage {
     MyAddress(SocketAddr, RemoteId, String),
     /// Sender, one which remains to be confirmed
-    Confirming(RemoteId, RemoteId),
+    State(StateUpdate),
     AllConfirmed,
     Stats(Vec<RoundSenderResults>, Vec<RoundReceiverResults>),
     Error(String),
