@@ -4,12 +4,18 @@ const USAGE: &'static str = "
 Complete Lambda Traffic Experiment
 
 Usage:
-  local [options] <remotes> <exp-name>
+  local bipartite [options] <senders> <receivers> <exp-name>
+  local complete [options] <remotes> <exp-name>
+  local dipairs [options] <pairs> <exp-name>
+  local bipairs [options] <pairs> <exp-name>
   local (-h | --help)
 
 Arguments:
-  remotes             the number of remotes to create
-  exp-name            the name of this experiment
+  remotes           the number of remotes to create
+  senders           the number of remotes that should send
+  receivers         the number of remotes that should receive
+  pairs             the number of pairs to create
+  exp-name          the name of this experiment
 
 Options:
   -h --help         Show this screen.
@@ -23,7 +29,14 @@ Options:
 
 #[derive(Debug, Deserialize)]
 pub struct Args {
-    pub arg_remotes: u16,
+    pub cmd_bipartite: bool,
+    pub cmd_complete: bool,
+    pub cmd_dipairs: bool,
+    pub cmd_bipairs: bool,
+    pub arg_remotes: Option<u16>,
+    pub arg_senders: Option<u16>,
+    pub arg_receivers: Option<u16>,
+    pub arg_pairs: Option<u16>,
     pub arg_exp_name: String,
     pub flag_rounds: u16,
     pub flag_packets: u16,

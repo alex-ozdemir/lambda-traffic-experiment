@@ -28,7 +28,9 @@ mod net;
 use net::{ReadResult, TcpMsgStream};
 
 use msg::experiment::{RoundPlan, RoundReceiverResults, RoundSenderResults};
-use msg::{LambdaResult, LambdaStart, LocalTcpMessage, RemoteId, RemoteTcpMessage, RoundId, StateUpdate};
+use msg::{
+    LambdaResult, LambdaStart, LocalTcpMessage, RemoteId, RemoteTcpMessage, RoundId, StateUpdate,
+};
 pub const UDP_PAYLOAD_BYTES: usize = 1372; // For an IP packet of size 1400
 
 thread_local! {
@@ -72,7 +74,7 @@ struct UdpPuncher {
     socket: UdpSocket,
     addr_map: BTreeMap<RemoteId, SocketAddr>,
     to_connect: BTreeMap<RemoteId, Instant>,
-    to_accept: BTreeSet<RemoteId>,
+    to_accept: BTreeMap<RemoteId, Instant>,
     to_pong: BTreeMap<RemoteId, Instant>,
     id: RemoteId,
 }
@@ -90,7 +92,7 @@ impl UdpPuncher {
             socket,
             addr_map,
             to_connect: to_connect.into_iter().map(|i| (i, now)).collect(),
-            to_accept,
+            to_accept: to_accept.into_iter().map(|i| (i, now)).collect(),
             to_pong: BTreeMap::new(),
             id,
         }
@@ -99,7 +101,7 @@ impl UdpPuncher {
     fn maintain_connections(&mut self) -> io::Result<()> {
         // Send pings
         let now = Instant::now();
-        for (id, next_ping_time) in &mut self.to_connect {
+        for (id, next_ping_time) in self.to_connect.iter_mut().chain(self.to_accept.iter_mut()) {
             if now >= *next_ping_time {
                 let addr = self
                     .addr_map
@@ -134,11 +136,17 @@ impl UdpPuncher {
         while let Some(msg) = self.read_socket::<EstMsg>()? {
             match msg.1 {
                 EstMsg::Ping(from) => {
-                    self.to_pong.insert(from, Instant::now());
-                    self.to_accept.remove(&from);
+                    if self.to_accept.contains_key(&from) {
+                        info!("First ping from {}", from);
+                        self.to_pong.insert(from, Instant::now());
+                        self.to_accept.remove(&from);
+                    }
                 }
                 EstMsg::Pong(from) => {
-                    self.to_connect.remove(&from);
+                    if self.to_connect.contains_key(&from) {
+                        info!("First pong from {}", from);
+                        self.to_connect.remove(&from);
+                    }
                 }
             }
         }
@@ -156,7 +164,7 @@ impl UdpPuncher {
                 match self.socket.send_to(pong_buf.as_slice(), addr) {
                     Ok(len) => {
                         if len == pong_len {
-                            *next_pong_time = now + Duration::from_millis(2000);
+                            *next_pong_time = now + Duration::from_millis(5000);
                         } else {
                             return Err(mk_err(format!(
                                 "Pong length was {} but only {} was sent",
@@ -263,7 +271,7 @@ impl ExperimentProgress {
 
 struct Remote {
     puncher: UdpPuncher,
-    recipients: Vec<RemoteId>,
+    downstream: Vec<RemoteId>,
     upstream: Vec<RemoteId>,
     local_connection: TcpMsgStream,
     remote_id: RemoteId,
@@ -281,7 +289,7 @@ enum RemoteState {
 }
 
 impl Remote {
-    fn new(mut start: LambdaStart, c: lambda::Context) -> Self {
+    fn new(start: LambdaStart, c: lambda::Context) -> Self {
         info!("Starting with invocation {:?}", start);
         let (socket, my_addr) = net::open_public_udp(start.port);
         let remote_id = start.remote_id;
@@ -305,22 +313,16 @@ impl Remote {
             }
         };
 
-        let to_accept: BTreeSet<RemoteId> = start
-            .plan
-            .recipients
-            .iter()
-            .filter(|(_, recipients)| recipients.contains(&remote_id))
-            .map(|(i, _)| *i)
-            .collect();
-        let to_connect: BTreeSet<RemoteId> = start.plan.recipients.remove(&remote_id).unwrap();
-        let recipients: Vec<RemoteId> = to_connect.iter().cloned().collect();
-        let upstream: Vec<RemoteId> = to_accept.iter().cloned().collect();
+        let to_accept: BTreeSet<RemoteId> = start.upstream.clone().into_iter().collect();
+        let to_connect: BTreeSet<RemoteId> = start.downstream.clone().into_iter().collect();
+        let downstream = start.downstream;
+        let upstream = start.upstream;
         let puncher = UdpPuncher::new(socket, remote_id, addr_map, to_connect, to_accept);
 
-        let progress = ExperimentProgress::new(remote_id, start.plan.rounds);
+        let progress = ExperimentProgress::new(remote_id, start.rounds);
         Remote {
             puncher,
-            recipients,
+            downstream,
             upstream,
             local_connection: tcp,
             remote_id,
@@ -331,29 +333,34 @@ impl Remote {
     }
 
     fn send_packet_to_next(&mut self) -> io::Result<Option<()>> {
-        let id = self.recipients[self.progress.packets_this_round as usize % self.recipients.len()];
-        self.puncher
-            .send_to(
-                &Packet {
-                    from: self.remote_id,
-                    to: id,
-                    round: self.progress.round_id,
-                },
-                id,
-            )
-            .map(|o| {
-                o.map(|()| {
-                    self.progress.packets_this_round += 1;
-                    let traffic = self
-                        .progress
-                        .send_results
-                        .data_by_receiver
-                        .get_mut(&id)
-                        .unwrap();
-                    traffic.packets += 1;
-                    traffic.bytes += (UDP_PAYLOAD_BYTES + 28) as u64;
+        if self.downstream.len() > 0 {
+            let id =
+                self.downstream[self.progress.packets_this_round as usize % self.downstream.len()];
+            self.puncher
+                .send_to(
+                    &Packet {
+                        from: self.remote_id,
+                        to: id,
+                        round: self.progress.round_id,
+                    },
+                    id,
+                )
+                .map(|o| {
+                    o.map(|()| {
+                        self.progress.packets_this_round += 1;
+                        let traffic = self
+                            .progress
+                            .send_results
+                            .data_by_receiver
+                            .get_mut(&id)
+                            .unwrap();
+                        traffic.packets += 1;
+                        traffic.bytes += (UDP_PAYLOAD_BYTES + 28) as u64;
+                    })
                 })
-            })
+        } else {
+            Ok(Some(()))
+        }
     }
 
     fn read_local(&mut self) -> io::Result<Option<RemoteTcpMessage>> {
@@ -410,11 +417,11 @@ impl Remote {
             RemoteState::Establish => {
                 self.puncher.maintain_connections()?;
                 if self.puncher.accepted_all() {
-                    self.send_to_master(&LocalTcpMessage::AllConfirmed).ok();
+                    self.send_to_master(&LocalTcpMessage::AllConfirmed)?;
                     self.progress.send_results = RoundSenderResults::new(
                         self.remote_id,
                         self.progress.round_id,
-                        &self.recipients,
+                        &self.downstream,
                     );
                     self.progress.receive_results = RoundReceiverResults::new(
                         self.remote_id,
@@ -468,16 +475,12 @@ impl Remote {
                             .map(|r| r.packets_per_ms)
                             .unwrap_or(0);
                         self.progress.packets_per_ms = ps;
-                        info!(
-                            "Starting round {} with {} p/s",
-                            self.progress.round_id, self.progress.packets_per_ms
-                        );
                         let sr = std::mem::replace(
                             &mut self.progress.send_results,
                             RoundSenderResults::new(
                                 self.remote_id,
                                 self.progress.round_id,
-                                &self.recipients,
+                                &self.downstream,
                             ),
                         );
                         let rr = std::mem::replace(
@@ -497,12 +500,39 @@ impl Remote {
                         self.progress.packets_r_this_round = 0;
                         self.progress.round_end = self.progress.round_start
                             + self.progress.round_plans[self.progress.round_id as usize].duration;
+                        info!(
+                            "Starting round {} with {} p/s from {:?}, to {:?}, @ {:?}",
+                            self.progress.round_id, self.progress.packets_per_ms, self.progress.round_start,
+                            self.progress.round_end, now
+                        );
                     }
                     Ok(None)
                 } else {
                     Ok(Some(Duration::from_millis(10)))
                 }
             }
+        }
+    }
+
+    fn update_master(&mut self) {
+        if self.last_local_time.elapsed() >= Duration::from_secs(1) {
+            self.last_local_time = Instant::now();
+            let update = match self.state {
+                RemoteState::Establish => StateUpdate::Connecting {
+                    unconnected: self.puncher.to_accept.len() as u16,
+                    desired: self.upstream.len() as u16,
+                },
+                RemoteState::Receive | RemoteState::Send => StateUpdate::InRound {
+                    id: self.progress.round_id,
+                    packets_r: self.progress.packets_r_this_round,
+                    packets_s: self.progress.packets_this_round,
+                },
+                RemoteState::WaitForStart => StateUpdate::Connected,
+            };
+            info!(
+                "Local update: {:?}",
+                self.send_to_master(&LocalTcpMessage::State(update))
+            );
         }
     }
 
@@ -516,25 +546,7 @@ impl Remote {
                 .ok();
                 return;
             }
-            if self.last_local_time.elapsed() >= Duration::from_secs(1) {
-                self.last_local_time = Instant::now();
-                let update = match self.state {
-                    RemoteState::Establish => StateUpdate::Connecting {
-                        unconnected: self.puncher.to_accept.len() as u16,
-                        desired: self.upstream.len() as u16,
-                    },
-                    RemoteState::Receive | RemoteState::Send => StateUpdate::InRound {
-                        id: self.progress.round_id,
-                        packets_r: self.progress.packets_r_this_round,
-                        packets_s: self.progress.packets_this_round,
-                    },
-                    RemoteState::WaitForStart => StateUpdate::Connected,
-                };
-                info!(
-                    "Local update: {:?}",
-                    self.send_to_master(&LocalTcpMessage::State(update))
-                );
-            }
+            self.update_master();
             match self.step() {
                 Ok(Some(sleep_time)) => {
                     std::thread::sleep(sleep_time);

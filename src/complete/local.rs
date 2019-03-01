@@ -74,7 +74,7 @@ struct Local {
     running: Arc<AtomicBool>,
     exp_name: String,
     results: Vec<(Vec<RoundSenderResults>, Vec<RoundReceiverResults>)>,
-    remote_states: BTreeMap<RemoteId,(Instant,Option<StateUpdate>)>,
+    remote_states: BTreeMap<RemoteId, (Instant, Option<StateUpdate>)>,
     last_status_update: Instant,
     //progress: Progress,
 }
@@ -89,11 +89,23 @@ impl Local {
         println!("Making lambda client");
         let client = aws_lambda::LambdaClient::new(aws::Region::UsWest1);
 
+        let mut upstreams: BTreeMap<RemoteId, Vec<RemoteId>> =
+            (0..n_remotes).map(|i| (i, Vec::new())).collect();
+        for (src, sinks) in &plan.recipients {
+            for sink in sinks {
+                upstreams.get_mut(&sink).unwrap().push(*src);
+            }
+        }
         println!("Issuing invocations");
         for i in 0..n_remotes {
+            let upstream = upstreams.remove(&i).unwrap();
+            let downstream = plan.recipients.get(&i).unwrap().clone();
+            println!("{} from {:?} to {:?}", i, upstream, downstream);
             let start = LambdaStart {
                 local_addr: SocketAddr::new(udp_addr.ip(), port),
-                plan: plan.clone(),
+                rounds: plan.rounds.clone(),
+                downstream,
+                upstream,
                 port,
                 remote_id: i,
                 n_remotes,
@@ -112,7 +124,7 @@ impl Local {
 
         let mut remotes: BTreeMap<RemoteId, (SocketAddr, TcpMsgStream, String)> = (0..n_remotes)
             .map(|i| {
-                println!("Waiting for remote #{}/{}", i, n_remotes);
+                println!("Waiting for remote #{}/{}", i + 1, n_remotes);
                 let (stream, tcp_addr) = tcp_socket.accept().unwrap();
                 let mut stream = TcpMsgStream::new(stream);
                 let msg = stream.read::<LocalTcpMessage>(true).unwrap();
@@ -132,8 +144,10 @@ impl Local {
             .collect();
 
         println!("Remote addresses {:?}", remote_addrs);
-        let mut contact_times: BTreeMap<_, _> =
-                remotes.keys().map(|i| (*i, (Instant::now(), None))).collect();
+        let mut contact_times: BTreeMap<_, _> = remotes
+            .keys()
+            .map(|i| (*i, (Instant::now(), None)))
+            .collect();
 
         remotes
             .iter_mut()
@@ -143,19 +157,19 @@ impl Local {
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
             })
             .count();
+        let logs = remotes
+            .iter()
+            .map(|(id, (_, _, log))| {
+                println!("{} {}", id, log);
+                (*id, log.clone())
+            })
+            .collect::<BTreeMap<_, _>>();
         {
             let mut unconfirmed: BTreeSet<_> = remotes.keys().cloned().collect();
             println!(
                 "Waiting for {} workers to confirm connections",
                 unconfirmed.len()
             );
-            let _logs = remotes
-                .iter()
-                .map(|(id, (_, _, log))| {
-                    println!("{} {}", id, log);
-                    (*id, log.clone())
-                })
-                .collect::<BTreeMap<_, _>>();
             let mut last_local_time = Instant::now();
             while !unconfirmed.is_empty() {
                 if last_local_time.elapsed() > Duration::from_secs(1) {
@@ -170,8 +184,7 @@ impl Local {
                         Ok(ReadResult::Data(LocalTcpMessage::State(update))) => {
                             *contact_times.get_mut(&id).unwrap() = (Instant::now(), Some(update));
                         }
-                        Ok(ReadResult::WouldBlock) => {
-                        }
+                        Ok(ReadResult::WouldBlock) => {}
                         e => panic!(
                             "Expected the remotes to confirm peers, got {:?} from {}",
                             e, id
@@ -197,6 +210,9 @@ impl Local {
 
         ctrlc::set_handler(move || {
             r.store(false, Ordering::SeqCst);
+            for (id, log) in &logs {
+                println!("{} {}", id, log);
+            }
         })
         .expect("Error setting Ctrl-C handler");
 
@@ -230,11 +246,9 @@ impl Local {
             {
                 ReadResult::WouldBlock => {}
                 ReadResult::Data(LocalTcpMessage::Stats(sr, rr)) => {
-                    info!("Results from {}", i);
                     results.push((*i, (sr, rr)));
                 }
                 ReadResult::Data(LocalTcpMessage::State(update)) => {
-                    println!("Update from {}", i);
                     *self.remote_states.get_mut(i).unwrap() = (Instant::now(), Some(update));
                 }
                 wat => {
@@ -243,7 +257,8 @@ impl Local {
             }
         }
         if results.len() > 0 {
-            println!("Got results {}/{}", self.results.len(), self.n_remotes);
+            println!("Got results {}/{}", results.len() + self.results.len(), self.n_remotes);
+            println!("Waiting on {:?}", self.remotes.iter().map(|(i,_)| i).collect::<BTreeSet<_>>());
         }
         for (id, _) in &results {
             self.remotes.remove(id).unwrap();
@@ -253,7 +268,7 @@ impl Local {
     }
 
     fn maybe_print_status(&mut self) {
-        if self.last_status_update.elapsed() >= Duration::from_millis(1000) {
+        if self.last_status_update.elapsed() >= Duration::from_millis(5000) {
             self.last_status_update = Instant::now();
             for (id, _) in &self.remote_states {
                 print!("{:5}", id)
@@ -266,8 +281,8 @@ impl Local {
             println!("");
             for (_, (_, s)) in &self.remote_states {
                 match s {
-                    Some(StateUpdate::Connected) =>          print!("    c"),
-                    Some(StateUpdate::Connecting { .. }) =>  print!("    w"),
+                    Some(StateUpdate::Connected) => print!("    c"),
+                    Some(StateUpdate::Connecting { .. }) => print!("    w"),
                     Some(StateUpdate::InRound { id, .. }) => print!("{:5}", id),
                     None => print!("    -"),
                 };
@@ -317,12 +332,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.flag_rounds,
         args.flag_packets,
     );
-    let plan = ExperimentPlan {
-        rounds,
-        recipients: msg::experiment::recipients_complete(args.arg_remotes),
+    let (n_remotes, recipients) = if args.cmd_complete {
+        (
+            args.arg_remotes.unwrap(),
+            msg::experiment::recipients_complete(args.arg_remotes.unwrap()),
+        )
+    } else if args.cmd_bipartite {
+        (
+            args.arg_senders.unwrap() + args.arg_receivers.unwrap(),
+            msg::experiment::recipients_bipartite(
+                args.arg_senders.unwrap(),
+                args.arg_receivers.unwrap(),
+            ),
+        )
+    } else if args.cmd_dipairs {
+        (
+            2 * args.arg_pairs.unwrap(),
+            msg::experiment::recipients_dipairs(args.arg_pairs.unwrap()),
+        )
+    } else if args.cmd_bipairs {
+        (
+            2 * args.arg_pairs.unwrap(),
+            msg::experiment::recipients_bipairs(args.arg_pairs.unwrap()),
+        )
+    } else {
+        panic!("Unknown command")
     };
+    let plan = ExperimentPlan { rounds, recipients };
     let mut local = Local::new(
-        args.arg_remotes,
+        n_remotes,
         args.flag_port,
         args.arg_exp_name.clone(),
         plan.clone(),

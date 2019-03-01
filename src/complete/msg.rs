@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::net::SocketAddr;
 
 pub type RemoteId = u16;
 pub type RoundId = u16;
@@ -11,14 +10,16 @@ pub type RoundId = u16;
 pub struct LambdaStart {
     pub local_addr: SocketAddr,
     pub port: u16,
-    pub plan: experiment::ExperimentPlan,
+    pub rounds: Vec<experiment::RoundPlan>,
+    pub upstream: Vec<RemoteId>,
+    pub downstream: Vec<RemoteId>,
     pub remote_id: RemoteId,
     pub n_remotes: u16,
 }
 
 pub mod experiment {
-    use std::time::Duration;
     use super::*;
+    use std::time::Duration;
 
     #[derive(Deserialize, Serialize, Debug, Clone)]
     pub struct RoundPlan {
@@ -55,7 +56,18 @@ pub mod experiment {
             Self {
                 remote_id,
                 round_id,
-                data_by_receiver: downstream.iter().map(|i| (*i,TrafficData{ packets: 0, bytes: 0 })).collect(),
+                data_by_receiver: downstream
+                    .iter()
+                    .map(|i| {
+                        (
+                            *i,
+                            TrafficData {
+                                packets: 0,
+                                bytes: 0,
+                            },
+                        )
+                    })
+                    .collect(),
                 errors: 0,
             }
         }
@@ -75,7 +87,18 @@ pub mod experiment {
             Self {
                 remote_id,
                 round_id,
-                data_by_sender: upstream.iter().map(|i| (*i,TrafficData{ packets: 0, bytes: 0 })).collect(),
+                data_by_sender: upstream
+                    .iter()
+                    .map(|i| {
+                        (
+                            *i,
+                            TrafficData {
+                                packets: 0,
+                                bytes: 0,
+                            },
+                        )
+                    })
+                    .collect(),
                 errors: 0,
             }
         }
@@ -84,48 +107,64 @@ pub mod experiment {
     #[derive(Deserialize, Serialize, Debug, Clone)]
     pub struct ExperimentPlan {
         pub rounds: Vec<RoundPlan>,
-        pub recipients: BTreeMap<RemoteId, BTreeSet<RemoteId>>,
+        pub recipients: BTreeMap<RemoteId, Vec<RemoteId>>,
     }
 
     pub fn rounds_with_varying_counts(
         duration: Duration,
         pause: Duration,
         packet_rates_per_ms: impl Iterator<Item = u16>,
-        ) -> Vec<RoundPlan> {
+    ) -> Vec<RoundPlan> {
         packet_rates_per_ms
             .map(|c| RoundPlan {
                 packets_per_ms: c,
                 duration: duration.clone(),
                 pause: pause.clone(),
             })
-        .collect()
+            .collect()
     }
     pub fn rounds_with_range_of_counts(
         duration: Duration,
         pause: Duration,
         rounds: u16,
         max_packets_per_ms: u16,
-        ) -> Vec<RoundPlan> {
+    ) -> Vec<RoundPlan> {
         rounds_with_varying_counts(
             duration,
             pause,
-            (1..=rounds)
-            .map(|i| ((i as u16 * max_packets_per_ms) as f64 / rounds as f64) as u16),
-            )
+            (1..=rounds).map(|i| ((i as u16 * max_packets_per_ms) as f64 / rounds as f64) as u16),
+        )
     }
 
-    pub fn recipients_complete(n_remotes: u16) -> BTreeMap<RemoteId, BTreeSet<RemoteId>> {
-        (0..n_remotes).map(|id| {
-            (id, (0..id).chain((id + 1)..n_remotes).collect())
-        }).collect()
+    pub fn recipients_complete(n_remotes: u16) -> BTreeMap<RemoteId, Vec<RemoteId>> {
+        (0..n_remotes)
+            .map(|id| (id, (0..id).chain((id + 1)..n_remotes).collect()))
+            .collect()
+    }
+    pub fn recipients_bipartite(senders: u16, receivers: u16) -> BTreeMap<RemoteId, Vec<RemoteId>> {
+        (0..senders)
+            .map(|id| (id, (senders..(receivers + senders)).collect()))
+            .chain((senders..(receivers + senders)).map(|id| (id, Vec::new())))
+            .collect()
+    }
+    pub fn recipients_dipairs(pairs: u16) -> BTreeMap<RemoteId, Vec<RemoteId>> {
+        (0..pairs)
+            .map(|id| (2 * id, vec![2 * id + 1]))
+            .chain((0..pairs).map(|id| (2 * id + 1, Vec::new())))
+            .collect()
+    }
+    pub fn recipients_bipairs(pairs: u16) -> BTreeMap<RemoteId, Vec<RemoteId>> {
+        (0..pairs)
+            .map(|id| (2 * id, vec![2 * id + 1]))
+            .chain((0..pairs).map(|id| (2 * id + 1, vec![2 * id])))
+            .collect()
     }
 }
 
-use experiment::{RoundSenderResults,RoundReceiverResults};
+use experiment::{RoundReceiverResults, RoundSenderResults};
 
 #[derive(Serialize, Debug, Clone)]
-pub struct LambdaResult {
-}
+pub struct LambdaResult {}
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum StateUpdate {
@@ -154,6 +193,46 @@ pub enum LocalTcpMessage {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum RemoteTcpMessage {
     Die,
-    AllAddrs(BTreeMap<RemoteId,SocketAddr>),
-    Start
+    AllAddrs(BTreeMap<RemoteId, SocketAddr>),
+    Start,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bipartite() {
+        let m = experiment::recipients_bipartite(2, 3);
+        assert_eq!(m.len(), 5);
+        assert_eq!(m[&0].len(), 3);
+        assert_eq!(m[&1].len(), 3);
+        assert_eq!(m[&2].len(), 0);
+        assert_eq!(m[&3].len(), 0);
+        assert_eq!(m[&4].len(), 0);
+    }
+
+    #[test]
+    fn dipairs() {
+        let m = experiment::recipients_dipairs(3);
+        assert_eq!(m.len(), 6);
+        assert_eq!(m[&0].len(), 1);
+        assert_eq!(m[&1].len(), 0);
+        assert_eq!(m[&2].len(), 1);
+        assert_eq!(m[&3].len(), 0);
+        assert_eq!(m[&4].len(), 1);
+        assert_eq!(m[&5].len(), 0);
+    }
+
+    #[test]
+    fn bipairs() {
+        let m = experiment::recipients_bipairs(3);
+        assert_eq!(m.len(), 6);
+        assert_eq!(m[&0].len(), 1);
+        assert_eq!(m[&1].len(), 1);
+        assert_eq!(m[&2].len(), 1);
+        assert_eq!(m[&3].len(), 1);
+        assert_eq!(m[&4].len(), 1);
+        assert_eq!(m[&5].len(), 1);
+    }
 }
