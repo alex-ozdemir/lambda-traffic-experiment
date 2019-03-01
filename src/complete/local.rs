@@ -1,3 +1,5 @@
+extern crate bincode;
+extern crate byteorder;
 extern crate ctrlc;
 extern crate indicatif;
 #[macro_use]
@@ -43,9 +45,9 @@ impl Progress {
         let pb = ProgressBar::new(expected_duration.as_millis() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed}] {wide_bar:.blue/cyan} Estimate: {eta}")
-                .progress_chars("##-"),
-        );
+            .template("[{elapsed}] {wide_bar:.blue/cyan} Estimate: {eta}")
+            .progress_chars("##-"),
+            );
         Self {
             start_time: now,
             last_update: now,
@@ -99,7 +101,7 @@ impl Local {
                     payload: Some(serde_json::to_vec(&start).unwrap()),
                     ..aws_lambda::InvocationRequest::default()
                 })
-                .sync()
+            .sync()
                 .unwrap();
             assert!(lambda_status.status_code.unwrap() == 202);
         }
@@ -118,7 +120,7 @@ impl Local {
                     _ => panic!("Expected the remote's address"),
                 }
             })
-            .collect();
+        .collect();
 
         let remote_addrs: BTreeMap<_, _> = remotes
             .iter()
@@ -133,31 +135,30 @@ impl Local {
                 stream
                     .write_all(
                         &bincode::serialize(&RemoteTcpMessage::AllAddrs(remote_addrs.clone()))
-                            .unwrap(),
-                    )
+                        .unwrap(),
+                        )
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
                 stream
                     .flush()
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
                 stream.set_nonblocking(true).unwrap();
             })
-            .count();
+        .count();
         {
             let mut unconfirmed: BTreeSet<_> = remotes.keys().cloned().collect();
             let mut contact_times: BTreeMap<_, _> =
                 remotes.keys().map(|i| (*i, Instant::now())).collect();
-            let mut status_t = Instant::now();
             println!(
                 "Waiting for {} workers to confirm connections",
                 unconfirmed.len()
             );
-            let logs = remotes
+            let _logs = remotes
                 .iter()
                 .map(|(id, (_, _, log))| {
                     println!("{} {}", id, log);
                     (*id, log.clone())
                 })
-                .collect::<BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
             while !unconfirmed.is_empty() {
                 for (id, (_, ref mut stream, _)) in &mut remotes {
                     let mut data = [0; 1400];
@@ -178,11 +179,6 @@ impl Local {
                                 "Waiting for {} workers to confirm connections",
                                 unconfirmed.len()
                             );
-                            if unconfirmed.len() < 5 {
-                                for i in &unconfirmed {
-                                    println!("  {} {}", i, logs.get(i).unwrap());
-                                }
-                            }
                         }
                         Ok(LocalTcpMessage::Confirming(id, _cf)) => {
                             *contact_times.get_mut(&id).unwrap() = Instant::now();
@@ -195,18 +191,6 @@ impl Local {
                             e, id
                         ),
                     }
-                }
-                if status_t.elapsed() >= Duration::from_secs(1) {
-                    let now = Instant::now();
-                    status_t = now;
-                    for id in contact_times.keys() {
-                        print!("{:5} ", id);
-                    }
-                    println!();
-                    for t in contact_times.values() {
-                        print!("{:5} ", (now - *t).as_millis());
-                    }
-                    println!();
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -223,7 +207,7 @@ impl Local {
                     .flush()
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
             })
-            .count();
+        .count();
 
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
@@ -240,7 +224,7 @@ impl Local {
             .sum();
         let est_time =
             Duration::from_millis((estimated_round_time.as_millis() as f64 * 1.1) as u64)
-                + Duration::from_secs(4);
+            + Duration::from_secs(4);
 
         Local {
             remotes,
@@ -252,52 +236,49 @@ impl Local {
         }
     }
 
-    fn poll_remotes(&mut self) {
+    fn poll_remotes(&mut self) -> Result<(), String> {
         let mut results = Vec::new();
-        self.remotes
-            .iter_mut()
-            .map(|(i, (_, ref mut stream, _))| {
-                let mut buf = [0; 65_507];
-                let mut bytes = 0;
-                let mut reading = false;
-                let mut first = true;
-                while first || reading {
-                    first = false;
-                    match stream.read(&mut buf[bytes..]) {
-                        Err(e) => assert!(
-                            e.kind() == std::io::ErrorKind::WouldBlock,
-                            "Socket error {:?}",
-                            e
-                        ),
-                        Ok(size) => {
-                            reading = true;
-                            bytes += size;
-                            let message = match bincode::deserialize(&buf[..bytes]) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    warn!(
-                                        "Couldn't parse message from remote {} with size {}, err {}",
-                                        i, bytes, e
-                                    );
-                                    continue;
-                                }
-                            };
-                            match message {
-                                LocalTcpMessage::Stats(sr, rr) => {
-                                    results.push((sr, rr));
-                                    break;
-                                }
-                                m => panic!("Expected results but found {:?}", m),
+        for (i, (_, ref mut stream, _)) in &mut self.remotes {
+            let mut buf = Vec::new();
+            loop {
+                match stream.read_to_end(&mut buf) {
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        if buf.len() == 0 {
+                            break;
+                        } else {
+                            continue;
+                        }
+                    }
+                    Err(ref e) => {
+                        return Err(format!("{}", e));
+                    }
+                    Ok(0) => {
+                        return Err(format!("Zero read from {}", i));
+                    }
+                    Ok(_) => {
+                        let message = bincode::deserialize(buf.as_slice())
+                            .map_err(|e| format!("Deser: {}", e))?;
+                        match message {
+                            LocalTcpMessage::Stats(sr, rr) => {
+                                info!("Results from {}", i);
+                                results.push((*i, (sr, rr)));
+                                break;
                             }
+                            m => return Err(format!("Expected results but found {:?}", m)),
                         }
                     }
                 }
-            })
-        .count();
+            }
+        }
+
         if results.len() > 0 {
             println!("Got results {}/{}", self.results.len(), self.n_remotes);
         }
-        self.results.extend(results);
+        for (id, _) in &results {
+            self.remotes.remove(id).unwrap();
+        }
+        self.results.extend(results.into_iter().map(|(_, b)| b));
+        Ok(())
     }
 
     fn maybe_die(&mut self) {
@@ -312,7 +293,7 @@ impl Local {
                         .flush()
                         .unwrap_or_else(|_| panic!("Could not send die to {}", id));
                 })
-                .count();
+            .count();
             println!("Experiment {} conluding", self.exp_name);
             std::process::exit(2)
         }
@@ -322,7 +303,12 @@ impl Local {
         while self.results.len() < self.n_remotes as usize {
             self.progress.maybe_update();
             self.maybe_die();
-            self.poll_remotes();
+            self.poll_remotes()
+                .map_err(|e| {
+                    error!("{}", e);
+                    self.running.store(false, Ordering::SeqCst);
+                })
+            .ok();
             std::thread::sleep(Duration::from_millis(50));
         }
         self.progress.finish();
@@ -337,18 +323,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         Duration::from_secs(args.flag_sleep as u64),
         args.flag_rounds,
         args.flag_packets,
-    );
+        );
     let plan = ExperimentPlan {
         rounds,
         recipients: msg::experiment::recipients_complete(args.arg_remotes),
     };
-    println!("Plan: {:#?}", plan);
     let mut local = Local::new(
         args.arg_remotes,
         args.flag_port,
         args.arg_exp_name.clone(),
         plan.clone(),
-    );
+        );
     local.run_till_results();
     let durations_and_rates = plan
         .rounds
@@ -358,9 +343,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             (
                 i as u16,
                 (rd.duration.as_millis() as f64 / 1000.0, rd.packets_per_ms),
-            )
+                )
         })
-        .collect::<BTreeMap<_, _>>();
+    .collect::<BTreeMap<_, _>>();
     let mut d: BTreeMap<(RoundId, RemoteId, RemoteId), (TrafficData, TrafficData, f64, u16)> =
         BTreeMap::new();
     for (srs, rrs) in &local.results {
@@ -371,7 +356,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let (d, r) = *durations_and_rates.get(&sr.round_id).unwrap();
                         (TrafficData::new(), TrafficData::new(), d, r)
                     })
-                    .0 = t.clone();
+                .0 = t.clone();
             }
         }
         for rr in rrs {
@@ -381,7 +366,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let (d, r) = *durations_and_rates.get(&rr.round_id).unwrap();
                         (TrafficData::new(), TrafficData::new(), d, r)
                     })
-                    .1 = t.clone();
+                .1 = t.clone();
             }
         }
     }
@@ -391,14 +376,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut f,
         "round,secs,rate,from,to,bytes_s,bytes_r,packets_s,packets_r"
     )
-    .unwrap();
+        .unwrap();
     for ((rd, from, to), (t_s, t_r, dur, rt)) in d {
         writeln!(
             &mut f,
             "{},{},{},{},{},{},{},{},{}",
             rd, dur, rt, from, to, t_s.bytes, t_r.bytes, t_s.packets, t_r.packets,
-        )
-        .unwrap()
+            )
+            .unwrap()
     }
 
     Ok(())

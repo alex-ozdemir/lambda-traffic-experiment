@@ -394,7 +394,7 @@ impl Remote {
     fn send_to_master(&mut self, msg: &LocalTcpMessage) -> io::Result<()> {
         info!("Sending {:?} to master", msg);
         let enc = bincode::serialize(msg).unwrap();
-        self.local_connection.write(&enc).map(|_| ())
+        self.local_connection.write_all(&enc).map(|_| ())
     }
 
     fn read_all_packets(&mut self) -> io::Result<()> {
@@ -423,10 +423,7 @@ impl Remote {
         let target_packets = (self.progress.round_start.elapsed().as_millis() as u64)
             * (self.progress.packets_per_ms as u64);
         if target_packets > self.progress.packets_this_round {
-            let send_now = std::cmp::min(50, target_packets - self.progress.packets_this_round);
-            for _ in 0..send_now {
-                self.send_packet_to_next()?;
-            }
+            self.send_packet_to_next()?;
         }
         Ok(())
     }
