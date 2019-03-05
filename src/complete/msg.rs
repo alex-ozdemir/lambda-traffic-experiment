@@ -14,6 +14,7 @@ pub struct LambdaStart {
     pub upstream: Vec<RemoteId>,
     pub downstream: Vec<RemoteId>,
     pub remote_id: RemoteId,
+    pub exp_name: String,
     pub n_remotes: u16,
 }
 
@@ -28,7 +29,7 @@ pub mod experiment {
         pub pause: Duration,
     }
 
-    #[derive(Deserialize, Serialize, Debug, Clone)]
+    #[derive(Deserialize, Serialize, PartialEq, Eq, Clone, Copy, Debug)]
     pub struct TrafficData {
         pub bytes: u64,
         pub packets: u64,
@@ -43,63 +44,18 @@ pub mod experiment {
         }
     }
 
-    #[derive(Deserialize, Serialize, Debug, Clone)]
-    pub struct RoundSenderResults {
-        pub remote_id: RemoteId,
-        pub round_id: RoundId,
-        pub data_by_receiver: BTreeMap<u16, TrafficData>,
-        pub errors: u64,
-    }
-
-    impl RoundSenderResults {
-        pub fn new(remote_id: RemoteId, round_id: RoundId, downstream: &Vec<RemoteId>) -> Self {
-            Self {
-                remote_id,
-                round_id,
-                data_by_receiver: downstream
-                    .iter()
-                    .map(|i| {
-                        (
-                            *i,
-                            TrafficData {
-                                packets: 0,
-                                bytes: 0,
-                            },
-                        )
-                    })
-                    .collect(),
-                errors: 0,
-            }
+    impl std::default::Default for TrafficData {
+        fn default() -> Self {
+            TrafficData::new()
         }
     }
 
-    #[derive(Deserialize, Serialize, Debug, Clone)]
-    pub struct RoundReceiverResults {
-        pub remote_id: RemoteId,
-        pub round_id: RoundId,
-        pub data_by_sender: BTreeMap<u16, TrafficData>,
-        /// Packets with the wrong round id or the wrong sender id.
-        pub errors: u64,
-    }
-
-    impl RoundReceiverResults {
-        pub fn new(remote_id: RemoteId, round_id: RoundId, upstream: &Vec<RemoteId>) -> Self {
-            Self {
-                remote_id,
-                round_id,
-                data_by_sender: upstream
-                    .iter()
-                    .map(|i| {
-                        (
-                            *i,
-                            TrafficData {
-                                packets: 0,
-                                bytes: 0,
-                            },
-                        )
-                    })
-                    .collect(),
-                errors: 0,
+    impl std::ops::Add for TrafficData {
+        type Output = TrafficData;
+        fn add(self, other: TrafficData) -> TrafficData {
+            TrafficData {
+                bytes: self.bytes + other.bytes,
+                packets: self.packets + other.packets,
             }
         }
     }
@@ -159,9 +115,87 @@ pub mod experiment {
             .chain((0..pairs).map(|id| (2 * id + 1, vec![2 * id])))
             .collect()
     }
-}
 
-use experiment::{RoundReceiverResults, RoundSenderResults};
+    #[derive(Deserialize, Serialize, PartialEq, Eq, Clone, Copy, Debug)]
+    pub struct LinkParams {
+        pub duration: Duration,
+        pub packets_per_ms: u16,
+    }
+
+    #[derive(Deserialize, Serialize, PartialEq, Eq, Clone, Debug)]
+    pub struct LinkData {
+        pub sent: TrafficData,
+        pub received: TrafficData,
+        pub params: LinkParams,
+    }
+
+    impl LinkData {
+        pub fn new(plan: &RoundPlan) -> Self {
+            Self {
+                sent: TrafficData::new(),
+                received: TrafficData::new(),
+                params: LinkParams {
+                    duration: plan.duration,
+                    packets_per_ms: plan.packets_per_ms,
+                }
+            }
+        }
+    }
+
+    impl std::ops::Add for &LinkData {
+        type Output = LinkData;
+        fn add(self, other: &LinkData) -> LinkData {
+            assert_eq!(self.params, other.params);
+            LinkData {
+                sent: self.sent + other.sent,
+                received: self.received + other.received,
+                params: self.params,
+            }
+        }
+    }
+
+    #[derive(Deserialize, Serialize, PartialEq, Eq, Clone, Debug)]
+    pub struct Results {
+        pub links: BTreeMap<(RemoteId, RemoteId, RoundId), LinkData>,
+    }
+
+    impl Results {
+        pub fn new() -> Self {
+            Self {
+                links: BTreeMap::new(),
+            }
+        }
+    }
+
+    impl std::ops::Add for Results {
+        type Output = Results;
+        fn add(self, other: Results) -> Results {
+            let keys = self
+                .links
+                .keys()
+                .cloned()
+                .chain(other.links.keys().cloned());
+            Results {
+                links: keys
+                    .map(|k| {
+                        let a = self.links.get(&k);
+                        let b = other.links.get(&k);
+                        (
+                            k.clone(),
+                            match (a, b) {
+                                (None, None) => unreachable!(),
+                                (Some(a), None) => a.clone(),
+                                (None, Some(b)) => b.clone(),
+                                (Some(a), Some(b)) => a + b,
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+}
 
 #[derive(Serialize, Debug, Clone)]
 pub struct LambdaResult {}
@@ -186,7 +220,6 @@ pub enum LocalTcpMessage {
     /// Sender, one which remains to be confirmed
     State(StateUpdate),
     AllConfirmed,
-    Stats(Vec<RoundSenderResults>, Vec<RoundReceiverResults>),
     Error(String),
 }
 

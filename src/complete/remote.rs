@@ -2,6 +2,8 @@
 extern crate lambda_runtime as lambda;
 #[macro_use]
 extern crate serde_derive;
+extern crate rusoto_core;
+extern crate rusoto_s3;
 extern crate serde_json;
 #[macro_use]
 extern crate log;
@@ -15,6 +17,8 @@ use lambda::error::HandlerError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use rusoto_s3::S3;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -27,7 +31,7 @@ mod net;
 
 use net::{ReadResult, TcpMsgStream};
 
-use msg::experiment::{RoundPlan, RoundReceiverResults, RoundSenderResults};
+use msg::experiment::{LinkData, Results, RoundPlan};
 use msg::{
     LambdaResult, LambdaStart, LocalTcpMessage, RemoteId, RemoteTcpMessage, RoundId, StateUpdate,
 };
@@ -238,11 +242,11 @@ impl UdpPuncher {
 }
 
 struct ExperimentProgress {
+    downstream: Vec<RemoteId>,
+    upstream: Vec<RemoteId>,
+    remote_id: RemoteId,
     round_id: RoundId,
-    send_results: RoundSenderResults,
-    receive_results: RoundReceiverResults,
-    all_send_results: Vec<RoundSenderResults>,
-    all_receive_results: Vec<RoundReceiverResults>,
+    results: Results,
     round_start: Instant,
     round_end: Instant,
     packets_this_round: u64,
@@ -252,13 +256,18 @@ struct ExperimentProgress {
 }
 
 impl ExperimentProgress {
-    fn new(id: RemoteId, round_plans: Vec<RoundPlan>) -> Self {
+    fn new(
+        remote_id: RemoteId,
+        downstream: Vec<RemoteId>,
+        upstream: Vec<RemoteId>,
+        round_plans: Vec<RoundPlan>,
+    ) -> Self {
         Self {
+            remote_id,
+            upstream,
+            downstream,
             round_id: 0,
-            send_results: RoundSenderResults::new(id, 0, &Vec::new()),
-            receive_results: RoundReceiverResults::new(id, 0, &Vec::new()),
-            all_send_results: Vec::new(),
-            all_receive_results: Vec::new(),
+            results: Results::new(),
             round_start: Instant::now(),
             round_end: Instant::now(),
             packets_this_round: 0,
@@ -267,16 +276,114 @@ impl ExperimentProgress {
             round_plans,
         }
     }
+
+    pub fn record_send(&mut self, to: RemoteId, bytes: u64) {
+        self.packets_this_round += 1;
+        let link_data = self
+            .results
+            .links
+            .get_mut(&(self.remote_id, to, self.round_id))
+            .unwrap();
+        link_data.sent.packets += 1;
+        link_data.sent.bytes += bytes;
+    }
+
+    pub fn record_receipt(&mut self, from: RemoteId, bytes: u64) {
+        self.packets_this_round += 1;
+        let link_data = self
+            .results
+            .links
+            .get_mut(&(from, self.remote_id, self.round_id))
+            .unwrap();
+        link_data.sent.packets += 1;
+        link_data.sent.bytes += bytes;
+    }
+
+    pub fn start_experiment(&mut self, start_time: Instant) -> io::Result<()> {
+        self.round_start = start_time;
+        self.round_id = 0;
+        let ps = self
+            .round_plans
+            .iter()
+            .nth(self.round_id as usize)
+            .map(|r| r.packets_per_ms)
+            .unwrap_or(0);
+        self.packets_per_ms = ps;
+        self.initialize_round(self.round_id);
+        if self.round_id as usize == self.round_plans.len() {
+            return Err(mk_err(format!("Done")));
+        }
+        self.packets_this_round = 0;
+        self.packets_r_this_round = 0;
+        self.round_end = self.round_start + self.round_plans[self.round_id as usize].duration;
+        info!(
+            "Starting round {} with {} p/s from {:?}, to {:?}, @ {:?}",
+            self.round_id,
+            self.packets_per_ms,
+            self.round_start,
+            self.round_end,
+            Instant::now(),
+        );
+        Ok(())
+    }
+
+    pub fn advance_round(&mut self) -> io::Result<()> {
+        self.round_start = self.round_end + self.round_plans[self.round_id as usize].pause;
+        self.round_id += 1;
+        if self.round_id as usize == self.round_plans.len() {
+            return Err(mk_err(format!("Done")));
+        }
+        if (self.round_id as usize) < self.round_plans.len() {
+            let ps = self
+                .round_plans
+                .iter()
+                .nth(self.round_id as usize)
+                .map(|r| r.packets_per_ms)
+                .unwrap_or(0);
+            self.packets_per_ms = ps;
+            self.initialize_round(self.round_id);
+            self.packets_this_round = 0;
+            self.packets_r_this_round = 0;
+            self.round_end = self.round_start + self.round_plans[self.round_id as usize].duration;
+            info!(
+                "Starting round {} with {} p/s from {:?}, to {:?}, @ {:?}",
+                self.round_id,
+                self.packets_per_ms,
+                self.round_start,
+                self.round_end,
+                Instant::now(),
+            );
+        } else {
+            info!("No more rounds");
+        }
+        Ok(())
+    }
+
+    pub fn initialize_round(&mut self, round: RoundId) {
+        for u in &self.upstream {
+            self.results.links.insert(
+                (*u, self.remote_id, round),
+                LinkData::new(&self.round_plans[round as usize]),
+            );
+        }
+        for d in &self.downstream {
+            self.results.links.insert(
+                (self.remote_id, *d, round),
+                LinkData::new(&self.round_plans[round as usize]),
+            );
+        }
+    }
 }
 
 struct Remote {
     puncher: UdpPuncher,
     downstream: Vec<RemoteId>,
     upstream: Vec<RemoteId>,
-    local_connection: TcpMsgStream,
+    local_connection: Option<TcpMsgStream>,
     remote_id: RemoteId,
     progress: ExperimentProgress,
     state: RemoteState,
+    exp_name: String,
     last_local_time: Instant,
 }
 
@@ -319,14 +426,20 @@ impl Remote {
         let upstream = start.upstream;
         let puncher = UdpPuncher::new(socket, remote_id, addr_map, to_connect, to_accept);
 
-        let progress = ExperimentProgress::new(remote_id, start.rounds);
+        let progress = ExperimentProgress::new(
+            start.remote_id,
+            downstream.clone(),
+            upstream.clone(),
+            start.rounds,
+        );
         Remote {
             puncher,
             downstream,
             upstream,
-            local_connection: tcp,
+            local_connection: Some(tcp),
             remote_id,
             progress,
+            exp_name: start.exp_name,
             state: RemoteState::Establish,
             last_local_time: Instant::now(),
         }
@@ -347,15 +460,8 @@ impl Remote {
                 )
                 .map(|o| {
                     o.map(|()| {
-                        self.progress.packets_this_round += 1;
-                        let traffic = self
-                            .progress
-                            .send_results
-                            .data_by_receiver
-                            .get_mut(&id)
-                            .unwrap();
-                        traffic.packets += 1;
-                        traffic.bytes += (UDP_PAYLOAD_BYTES + 28) as u64;
+                        self.progress
+                            .record_send(id, (UDP_PAYLOAD_BYTES + 28) as u64)
                     })
                 })
         } else {
@@ -364,38 +470,41 @@ impl Remote {
     }
 
     fn read_local(&mut self) -> io::Result<Option<RemoteTcpMessage>> {
-        match self
-            .local_connection
-            .read::<RemoteTcpMessage>(false)
-            .map_err(mk_err)?
-        {
-            ReadResult::WouldBlock => Ok(None),
-            ReadResult::EOF => Err(mk_err(format!("Master connection closed"))),
-            ReadResult::Data(t) => Ok(Some(t)),
-        }
+        self.local_connection
+            .as_mut()
+            .map(
+                |c| match c.read::<RemoteTcpMessage>(false).map_err(mk_err)? {
+                    ReadResult::WouldBlock => Ok(None),
+                    ReadResult::EOF => Err(mk_err(format!("Master connection closed"))),
+                    ReadResult::Data(t) => Ok(Some(t)),
+                },
+            )
+            .unwrap_or(Err(mk_err(format!(
+                "Tried to read a message from the master, but the connection was already closed"
+            ))))
     }
 
     fn send_to_master(&mut self, msg: &LocalTcpMessage) -> io::Result<()> {
         info!("Sending {:?} to master", msg);
-        self.local_connection.send(&msg)
+        self.local_connection
+            .as_mut()
+            .map(|c| c.send(&msg))
+            .unwrap_or(Err(mk_err(format!(
+                "Tried to send a message to the master, but the connection was already closed"
+            ))))
     }
 
     fn read_all_packets(&mut self) -> io::Result<()> {
         match self.puncher.read_socket::<Packet>()? {
             Some((size, Packet { from, to, round })) => {
                 if round == self.progress.round_id && to == self.remote_id {
-                    let traffic = self
-                        .progress
-                        .receive_results
-                        .data_by_sender
-                        .get_mut(&from)
-                        .unwrap();
-                    traffic.packets += 1;
-                    self.progress.packets_r_this_round += 1;
-                    traffic.bytes += (size + 28) as u64;
+                    self.progress.record_receipt(from, (size + 28) as u64);
                     Ok(())
                 } else {
-                    self.progress.receive_results.errors += 1;
+                    warn!(
+                        "I am {} doing round {}, but got a packet for {} doing round {}",
+                        self.remote_id, self.progress.round_id, to, round
+                    );
                     Ok(())
                 }
             }
@@ -418,16 +527,6 @@ impl Remote {
                 self.puncher.maintain_connections()?;
                 if self.puncher.accepted_all() {
                     self.send_to_master(&LocalTcpMessage::AllConfirmed)?;
-                    self.progress.send_results = RoundSenderResults::new(
-                        self.remote_id,
-                        self.progress.round_id,
-                        &self.downstream,
-                    );
-                    self.progress.receive_results = RoundReceiverResults::new(
-                        self.remote_id,
-                        self.progress.round_id,
-                        &self.upstream,
-                    );
                     self.state = RemoteState::WaitForStart;
                 }
                 Ok(Some(Duration::from_millis(10)))
@@ -435,14 +534,14 @@ impl Remote {
             RemoteState::WaitForStart => match self.read_local()? {
                 Some(RemoteTcpMessage::Start) => {
                     self.puncher.cease_traffic();
+                    {
+                        self.local_connection.take();
+                    }
+                    let start_time = Instant::now() + Duration::from_secs(6);
+                    self.progress.start_experiment(start_time)?;
                     std::thread::sleep(Duration::from_secs(2));
-                    self.puncher.maintain_connections()?;
+                    self.puncher.maintain_connections()?; // Drain the pings
                     std::thread::sleep(Duration::from_secs(2));
-                    self.progress.round_start = Instant::now() + Duration::from_secs(2);
-                    self.progress.round_end =
-                        self.progress.round_start + self.progress.round_plans[0].duration;
-                    self.progress.packets_this_round = 0;
-                    self.progress.packets_r_this_round = 0;
                     self.state = RemoteState::Receive;
                     Ok(None)
                 }
@@ -464,47 +563,7 @@ impl Remote {
                     if now < self.progress.round_end {
                         self.send_packets()?;
                     } else {
-                        self.progress.round_start = self.progress.round_end
-                            + self.progress.round_plans[self.progress.round_id as usize].pause;
-                        self.progress.round_id += 1;
-                        let ps = self
-                            .progress
-                            .round_plans
-                            .iter()
-                            .nth(self.progress.round_id as usize)
-                            .map(|r| r.packets_per_ms)
-                            .unwrap_or(0);
-                        self.progress.packets_per_ms = ps;
-                        let sr = std::mem::replace(
-                            &mut self.progress.send_results,
-                            RoundSenderResults::new(
-                                self.remote_id,
-                                self.progress.round_id,
-                                &self.downstream,
-                            ),
-                        );
-                        let rr = std::mem::replace(
-                            &mut self.progress.receive_results,
-                            RoundReceiverResults::new(
-                                self.remote_id,
-                                self.progress.round_id,
-                                &self.upstream,
-                            ),
-                        );
-                        self.progress.all_send_results.push(sr);
-                        self.progress.all_receive_results.push(rr);
-                        if self.progress.round_id as usize == self.progress.round_plans.len() {
-                            return Err(mk_err(format!("Done")));
-                        }
-                        self.progress.packets_this_round = 0;
-                        self.progress.packets_r_this_round = 0;
-                        self.progress.round_end = self.progress.round_start
-                            + self.progress.round_plans[self.progress.round_id as usize].duration;
-                        info!(
-                            "Starting round {} with {} p/s from {:?}, to {:?}, @ {:?}",
-                            self.progress.round_id, self.progress.packets_per_ms, self.progress.round_start,
-                            self.progress.round_end, now
-                        );
+                        self.progress.advance_round()?;
                     }
                     Ok(None)
                 } else {
@@ -514,6 +573,7 @@ impl Remote {
         }
     }
 
+    #[allow(dead_code)]
     fn update_master(&mut self) {
         if self.last_local_time.elapsed() >= Duration::from_secs(1) {
             self.last_local_time = Instant::now();
@@ -546,7 +606,7 @@ impl Remote {
                 .ok();
                 return;
             }
-            self.update_master();
+            //self.update_master();
             match self.step() {
                 Ok(Some(sleep_time)) => {
                     std::thread::sleep(sleep_time);
@@ -554,21 +614,33 @@ impl Remote {
                 Ok(None) => {}
                 Err(e) => {
                     if self.progress.round_id as usize == self.progress.round_plans.len() {
-                        let sr = std::mem::replace(&mut self.progress.all_send_results, Vec::new());
-                        let rr =
-                            std::mem::replace(&mut self.progress.all_receive_results, Vec::new());
-                        info!("Done: {:?}", (&sr, &rr));
-                        let sr = self.send_to_master(&LocalTcpMessage::Stats(sr, rr));
-                        info!("Send result: {:?}", sr);
-                        std::thread::sleep(Duration::from_secs(
-                            4 * self.progress.round_plans.len() as u64,
-                        )); // Just in case
+                        info!("Done: {:?}", self.progress.results);
+                        let client = rusoto_s3::S3Client::new(rusoto_core::Region::UsWest1);
+                        let string = match serde_json::to_string(&self.progress.results) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!("{}", e);
+                                return;
+                            }
+                        };
+
+                        let put = client
+                            .put_object(rusoto_s3::PutObjectRequest {
+                                bucket: "aozdemir-network-test".to_owned(),
+                                key: format!("{}/{}.json", self.exp_name, self.remote_id),
+                                body: Some(string.into_bytes().into()),
+                                ..rusoto_s3::PutObjectRequest::default()
+                            })
+                            .sync()
+                            .unwrap();
+                        info!("S3 Response: {:#?}", put);
                         return; // Done
+                    } else {
+                        error!("Notifying local of '{}' and finishing", e);
+                        self.send_to_master(&LocalTcpMessage::Error(format!("{}", e)))
+                            .ok();
+                        return;
                     }
-                    error!("Notifying local of '{}' and finishing", e);
-                    self.send_to_master(&LocalTcpMessage::Error(format!("{}", e)))
-                        .ok();
-                    return;
                 }
             }
         }

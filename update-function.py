@@ -31,10 +31,27 @@ def install_lambda_package(package_file, function_name, region):
     client = boto3.client('lambda', region_name=region)
 
     try:
-        response = client.update_function_code(
+        client.delete_function(FunctionName=function_name)
+        print("Deleted function '{}'.".format(function_name))
+    except:
+        pass
+
+    try:
+        response = client.create_function(
             FunctionName=function_name,
-            ZipFile=package_data
+            Runtime='provided',
+            Role='arn:aws:iam::387291866455:role/gg-lambda-role',
+            Handler='main.handler',
+            Code={
+                'ZipFile': package_data
+            },
+            Timeout=900,
+            MemorySize=3008
         )
+        #response = client.update_function_code(
+        #    FunctionName=function_name,
+        #    ZipFile=package_data
+        #)
         print("Updated function '{}' ({}).".format(
             function_name, response['FunctionArn']))
     except botocore.exceptions.ClientError as e:
@@ -64,8 +81,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Update the code for Lambda functions.")
     args = parser.parse_args()
-    update_binary('sender')
-    update_binary('receiver')
+    #update_binary('sender')
+    #update_binary('receiver')
     update_binary('complete-remote')
 
 

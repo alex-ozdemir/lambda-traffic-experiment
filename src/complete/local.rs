@@ -17,8 +17,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aws_lambda::Lambda;
@@ -29,8 +27,8 @@ mod msg;
 mod net;
 mod options;
 
-use msg::experiment::{ExperimentPlan, RoundReceiverResults, RoundSenderResults, TrafficData};
-use msg::{LambdaStart, LocalTcpMessage, RemoteTcpMessage, StateUpdate};
+use msg::experiment::{ExperimentPlan, TrafficData};
+use msg::{LambdaStart, LocalTcpMessage, RemoteTcpMessage};
 use msg::{RemoteId, RoundId};
 
 use net::{ReadResult, TcpMsgStream};
@@ -70,13 +68,9 @@ impl Progress {
 
 struct Local {
     n_remotes: u16,
-    remotes: BTreeMap<RemoteId, (SocketAddr, TcpMsgStream, String)>,
-    running: Arc<AtomicBool>,
     exp_name: String,
-    results: Vec<(Vec<RoundSenderResults>, Vec<RoundReceiverResults>)>,
-    remote_states: BTreeMap<RemoteId, (Instant, Option<StateUpdate>)>,
-    last_status_update: Instant,
-    //progress: Progress,
+    progress: Progress,
+    end_time: Instant,
 }
 
 impl Local {
@@ -109,6 +103,7 @@ impl Local {
                 port,
                 remote_id: i,
                 n_remotes,
+                exp_name: exp_name.clone(),
             };
             let lambda_status = client
                 .invoke(aws_lambda::InvocationRequest {
@@ -205,17 +200,6 @@ impl Local {
             })
             .count();
 
-        let running = Arc::new(AtomicBool::new(true));
-        let r = running.clone();
-
-        ctrlc::set_handler(move || {
-            r.store(false, Ordering::SeqCst);
-            for (id, log) in &logs {
-                println!("{} {}", id, log);
-            }
-        })
-        .expect("Error setting Ctrl-C handler");
-
         let estimated_round_time: Duration = plan
             .rounds
             .iter()
@@ -226,100 +210,19 @@ impl Local {
                 + Duration::from_secs(4);
 
         Local {
-            remotes,
             n_remotes,
-            running,
             exp_name,
-            results: Vec::new(),
-            remote_states: contact_times,
-            last_status_update: Instant::now(),
-            //progress: Progress::new(est_time),
-        }
-    }
-
-    fn poll_remotes(&mut self) -> Result<(), String> {
-        let mut results = Vec::new();
-        for (i, (_, ref mut stream, _)) in &mut self.remotes {
-            match stream
-                .read::<LocalTcpMessage>(false)
-                .map_err(|e| format!("{}", e))?
-            {
-                ReadResult::WouldBlock => {}
-                ReadResult::Data(LocalTcpMessage::Stats(sr, rr)) => {
-                    results.push((*i, (sr, rr)));
-                }
-                ReadResult::Data(LocalTcpMessage::State(update)) => {
-                    *self.remote_states.get_mut(i).unwrap() = (Instant::now(), Some(update));
-                }
-                wat => {
-                    return Err(format!("Got {:?} while reading results from {}", wat, i));
-                }
-            }
-        }
-        if results.len() > 0 {
-            println!("Got results {}/{}", results.len() + self.results.len(), self.n_remotes);
-            println!("Waiting on {:?}", self.remotes.iter().map(|(i,_)| i).collect::<BTreeSet<_>>());
-        }
-        for (id, _) in &results {
-            self.remotes.remove(id).unwrap();
-        }
-        self.results.extend(results.into_iter().map(|(_, b)| b));
-        Ok(())
-    }
-
-    fn maybe_print_status(&mut self) {
-        if self.last_status_update.elapsed() >= Duration::from_millis(5000) {
-            self.last_status_update = Instant::now();
-            for (id, _) in &self.remote_states {
-                print!("{:5}", id)
-            }
-            println!("");
-            let n = Instant::now();
-            for (_, (t, _)) in &self.remote_states {
-                print!("{:5.1}", (n - *t).as_millis() as f64 / 1000.0);
-            }
-            println!("");
-            for (_, (_, s)) in &self.remote_states {
-                match s {
-                    Some(StateUpdate::Connected) => print!("    c"),
-                    Some(StateUpdate::Connecting { .. }) => print!("    w"),
-                    Some(StateUpdate::InRound { id, .. }) => print!("{:5}", id),
-                    None => print!("    -"),
-                };
-            }
-            println!("\n");
-        }
-    }
-
-    fn maybe_die(&mut self) {
-        if !self.running.load(Ordering::SeqCst) {
-            self.remotes
-                .iter_mut()
-                .map(|(_, (_, ref mut stream, _))| {
-                    stream
-                        .send::<RemoteTcpMessage>(&RemoteTcpMessage::Die)
-                        .unwrap();
-                })
-                .count();
-            println!("Experiment {} dieing", self.exp_name);
-            std::process::exit(2)
+            progress: Progress::new(est_time),
+            end_time: Instant::now() + est_time,
         }
     }
 
     fn run_till_results(&mut self) {
-        while self.results.len() < self.n_remotes as usize {
-            //self.progress.maybe_update();
-            self.maybe_die();
-            self.poll_remotes()
-                .map_err(|e| {
-                    error!("{}", e);
-                    self.running.store(false, Ordering::SeqCst);
-                })
-                .ok();
-            self.maybe_print_status();
+        while Instant::now() < self.end_time {
+            self.progress.maybe_update();
             std::thread::sleep(Duration::from_millis(50));
         }
-        //self.progress.finish();
+        self.progress.finish();
     }
 }
 
@@ -366,57 +269,5 @@ fn main() -> Result<(), Box<dyn Error>> {
         plan.clone(),
     );
     local.run_till_results();
-    let durations_and_rates = plan
-        .rounds
-        .iter()
-        .enumerate()
-        .map(|(i, rd)| {
-            (
-                i as u16,
-                (rd.duration.as_millis() as f64 / 1000.0, rd.packets_per_ms),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut d: BTreeMap<(RoundId, RemoteId, RemoteId), (TrafficData, TrafficData, f64, u16)> =
-        BTreeMap::new();
-    for (srs, rrs) in &local.results {
-        for sr in srs {
-            for (r, t) in &sr.data_by_receiver {
-                d.entry((sr.round_id, sr.remote_id, *r))
-                    .or_insert_with(|| {
-                        let (d, r) = *durations_and_rates.get(&sr.round_id).unwrap();
-                        (TrafficData::new(), TrafficData::new(), d, r)
-                    })
-                    .0 = t.clone();
-            }
-        }
-        for rr in rrs {
-            for (s, t) in &rr.data_by_sender {
-                d.entry((rr.round_id, *s, rr.remote_id))
-                    .or_insert_with(|| {
-                        let (d, r) = *durations_and_rates.get(&rr.round_id).unwrap();
-                        (TrafficData::new(), TrafficData::new(), d, r)
-                    })
-                    .1 = t.clone();
-            }
-        }
-    }
-    std::fs::create_dir_all("data").unwrap();
-    let mut f = std::fs::File::create(format!("data/{}.csv", args.arg_exp_name)).unwrap();
-    println!("Writing file: {:?}", f);
-    writeln!(
-        &mut f,
-        "round,secs,rate,from,to,bytes_s,bytes_r,packets_s,packets_r"
-    )
-    .unwrap();
-    for ((rd, from, to), (t_s, t_r, dur, rt)) in d {
-        writeln!(
-            &mut f,
-            "{},{},{},{},{},{},{},{},{}",
-            rd, dur, rt, from, to, t_s.bytes, t_r.bytes, t_s.packets, t_r.packets,
-        )
-        .unwrap()
-    }
-
     Ok(())
 }
