@@ -288,15 +288,15 @@ impl ExperimentProgress {
         link_data.sent.bytes += bytes;
     }
 
-    pub fn record_receipt(&mut self, from: RemoteId, bytes: u64) {
-        self.packets_this_round += 1;
+    pub fn record_receipt(&mut self, from: RemoteId, bytes: u64, round: u16) {
+        self.packets_r_this_round += 1;
         let link_data = self
             .results
             .links
-            .get_mut(&(from, self.remote_id, self.round_id))
+            .get_mut(&(from, self.remote_id, round))
             .unwrap();
-        link_data.sent.packets += 1;
-        link_data.sent.bytes += bytes;
+        link_data.received.packets += 1;
+        link_data.received.bytes += bytes;
     }
 
     pub fn start_experiment(&mut self, start_time: Instant) -> io::Result<()> {
@@ -497,8 +497,8 @@ impl Remote {
     fn read_all_packets(&mut self) -> io::Result<()> {
         match self.puncher.read_socket::<Packet>()? {
             Some((size, Packet { from, to, round })) => {
-                if round == self.progress.round_id && to == self.remote_id {
-                    self.progress.record_receipt(from, (size + 28) as u64);
+                if to == self.remote_id {
+                    self.progress.record_receipt(from, (size + 28) as u64, round);
                     Ok(())
                 } else {
                     warn!(
@@ -589,10 +589,7 @@ impl Remote {
                 },
                 RemoteState::WaitForStart => StateUpdate::Connected,
             };
-            info!(
-                "Local update: {:?}",
-                self.send_to_master(&LocalTcpMessage::State(update))
-            );
+            info!("State: {:?}", update);
         }
     }
 
@@ -606,7 +603,7 @@ impl Remote {
                 .ok();
                 return;
             }
-            //self.update_master();
+            self.update_master();
             match self.step() {
                 Ok(Some(sleep_time)) => {
                     std::thread::sleep(sleep_time);
@@ -614,20 +611,13 @@ impl Remote {
                 Ok(None) => {}
                 Err(e) => {
                     if self.progress.round_id as usize == self.progress.round_plans.len() {
-                        info!("Done: {:?}", self.progress.results);
                         let client = rusoto_s3::S3Client::new(rusoto_core::Region::UsWest1);
-                        let string = match serde_json::to_string(&self.progress.results) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                error!("{}", e);
-                                return;
-                            }
-                        };
-
+                        let string = format!("{}", self.progress.results);
+                        info!("Done: \n{}", string);
                         let put = client
                             .put_object(rusoto_s3::PutObjectRequest {
                                 bucket: "aozdemir-network-test".to_owned(),
-                                key: format!("{}/{}.json", self.exp_name, self.remote_id),
+                                key: format!("{}/{}.csv", self.exp_name, self.remote_id),
                                 body: Some(string.into_bytes().into()),
                                 ..rusoto_s3::PutObjectRequest::default()
                             })

@@ -2,8 +2,6 @@ extern crate bincode;
 extern crate byteorder;
 extern crate ctrlc;
 extern crate indicatif;
-#[macro_use]
-extern crate log;
 extern crate rand;
 extern crate rusoto_core as aws;
 extern crate rusoto_lambda as aws_lambda;
@@ -15,7 +13,6 @@ extern crate stun;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
@@ -27,9 +24,9 @@ mod msg;
 mod net;
 mod options;
 
-use msg::experiment::{ExperimentPlan, TrafficData};
+use msg::experiment::ExperimentPlan;
 use msg::{LambdaStart, LocalTcpMessage, RemoteTcpMessage};
-use msg::{RemoteId, RoundId};
+use msg::{RemoteId};
 
 use net::{ReadResult, TcpMsgStream};
 
@@ -67,8 +64,6 @@ impl Progress {
 }
 
 struct Local {
-    n_remotes: u16,
-    exp_name: String,
     progress: Progress,
     end_time: Instant,
 }
@@ -152,7 +147,7 @@ impl Local {
                     .unwrap_or_else(|_| panic!("Could not send addresses to {}", id));
             })
             .count();
-        let logs = remotes
+        let _logs = remotes
             .iter()
             .map(|(id, (_, _, log))| {
                 println!("{} {}", id, log);
@@ -165,12 +160,7 @@ impl Local {
                 "Waiting for {} workers to confirm connections",
                 unconfirmed.len()
             );
-            let mut last_local_time = Instant::now();
             while !unconfirmed.is_empty() {
-                if last_local_time.elapsed() > Duration::from_secs(1) {
-                    last_local_time = Instant::now();
-                    println!("{:?}", contact_times);
-                }
                 for (id, (_, ref mut stream, _)) in &mut remotes {
                     match stream.read::<LocalTcpMessage>(false) {
                         Ok(ReadResult::Data(LocalTcpMessage::AllConfirmed)) => {
@@ -210,8 +200,6 @@ impl Local {
                 + Duration::from_secs(4);
 
         Local {
-            n_remotes,
-            exp_name,
             progress: Progress::new(est_time),
             end_time: Instant::now() + est_time,
         }

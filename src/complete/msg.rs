@@ -137,7 +137,7 @@ pub mod experiment {
                 params: LinkParams {
                     duration: plan.duration,
                     packets_per_ms: plan.packets_per_ms,
-                }
+                },
             }
         }
     }
@@ -192,6 +192,39 @@ pub mod experiment {
                     })
                     .collect(),
             }
+        }
+    }
+
+    impl std::fmt::Display for Results {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            writeln!(
+                f,
+                "from,to,round,duration,packets_per_ms,bytes_s,bytes_r,packets_s,packets_r"
+            )?;
+            for (
+                (from, to, round),
+                LinkData {
+                    sent,
+                    received,
+                    params,
+                },
+            ) in &self.links
+            {
+                writeln!(
+                    f,
+                    "{},{},{},{},{},{},{},{},{}",
+                    from,
+                    to,
+                    round,
+                    params.duration.as_millis() as f64 / 1000.0,
+                    params.packets_per_ms,
+                    sent.bytes,
+                    received.bytes,
+                    sent.packets,
+                    received.packets,
+                )?;
+            }
+            Ok(())
         }
     }
 

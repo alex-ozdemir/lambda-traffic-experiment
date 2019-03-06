@@ -16,8 +16,8 @@ ANSI_RESET = '\033[0m'
 
 def create_function_package(output, binary_path):
     PACKAGE_FILES = {
-        "bootstrap": binary_path,
-    }
+            "bootstrap": binary_path,
+            }
 
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as funczip:
         for fn, fp in PACKAGE_FILES.items():
@@ -38,16 +38,21 @@ def install_lambda_package(package_file, function_name, region):
 
     try:
         response = client.create_function(
-            FunctionName=function_name,
-            Runtime='provided',
-            Role='arn:aws:iam::387291866455:role/gg-lambda-role',
-            Handler='main.handler',
-            Code={
-                'ZipFile': package_data
-            },
-            Timeout=900,
-            MemorySize=3008
-        )
+                FunctionName=function_name,
+                Runtime='provided',
+                Role='arn:aws:iam::387291866455:role/gg-lambda-role',
+                Handler='main.handler',
+                Code={
+                    'ZipFile': package_data
+                    },
+                Timeout=900,
+                MemorySize=3008,
+                Environment={
+                    'Variables': {
+                        'RUST_BACKTRACE': '1'
+                        }
+                    },
+                )
         #response = client.update_function_code(
         #    FunctionName=function_name,
         #    ZipFile=package_data
@@ -61,14 +66,13 @@ def install_lambda_package(package_file, function_name, region):
 
 def update_binary(cargo_binary_name):
     binary_path = './target/x86_64-unknown-linux-musl/release/{}'.format(
-        cargo_binary_name)
+            cargo_binary_name)
     function_name = 'rust-test-{}'.format(cargo_binary_name)
     function_package = "{}.zip".format(function_name)
 
     if not os.path.exists(binary_path):
         raise Exception("Cannot find {} binary at {}".format(
             cargo_binary_name, binary_path))
-
     try:
         create_function_package(function_package, binary_path)
         print("Installing lambda function {}... ".format(function_name), end='')
@@ -79,7 +83,7 @@ def update_binary(cargo_binary_name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Update the code for Lambda functions.")
+            description="Update the code for Lambda functions.")
     args = parser.parse_args()
     #update_binary('sender')
     #update_binary('receiver')
