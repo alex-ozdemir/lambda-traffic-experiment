@@ -5,6 +5,7 @@ Adapted from Sadjad's python script in pbrt-cloud
 '''
 
 import os
+import sys
 import zipfile
 import argparse
 import boto3
@@ -24,28 +25,52 @@ def create_function_package(output, binary_path):
             funczip.write(fp, fn)
 
 
-def install_lambda_package(package_file, function_name, region):
+def install_lambda_package(package_file, salt, function_name, region):
+
     with open(package_file, 'rb') as pfin:
         package_data = pfin.read()
 
     client = boto3.client('lambda', region_name=region)
 
     try:
-        response = client.update_function_code(
+        client.delete_function(FunctionName=function_name)
+        print("Deleted function '{}'.".format(function_name))
+    except:
+        pass
+
+    try:
+        response = client.create_function(
             FunctionName=function_name,
-            ZipFile=package_data
+            Runtime='provided',
+            Role='arn:aws:iam::387291866455:role/gg-lambda-role',
+            Handler='main.handler',
+            Code={
+                    'ZipFile': package_data
+            },
+            Timeout=900,
+            MemorySize=3008,
+            Environment={
+                'Variables': {
+                    'RUST_BACKTRACE': '1'
+                }
+            },
         )
+        # response = client.update_function_code(
+        #    FunctionName=function_name,
+        #    ZipFile=package_data
+        # )
         print("Updated function '{}' ({}).".format(
             function_name, response['FunctionArn']))
+
     except botocore.exceptions.ClientError as e:
         print("{}Failed to update function because:{}\n  {}".format(
             ANSI_RED, ANSI_RESET, e.response['Error']['Message']))
 
 
-def update_binary(cargo_binary_name):
+def update_binary(cargo_binary_name, salt):
     binary_path = './target/x86_64-unknown-linux-musl/release/{}'.format(
         cargo_binary_name)
-    function_name = 'rust-test-{}'.format(cargo_binary_name)
+    function_name = 'rust-test-{}-{}'.format(salt, cargo_binary_name)
     function_package = "{}.zip".format(function_name)
 
     if not os.path.exists(binary_path):
@@ -55,17 +80,16 @@ def update_binary(cargo_binary_name):
     try:
         create_function_package(function_package, binary_path)
         print("Installing lambda function {}... ".format(function_name), end='')
-        install_lambda_package(function_package, function_name, os.environ.get('AWS_REGION'))
+        install_lambda_package(
+            function_package, salt, function_name, os.environ.get('AWS_REGION'))
     finally:
         os.remove(function_package)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Update the code for Lambda functions.")
-    args = parser.parse_args()
-    update_binary('sender')
-    update_binary('receiver')
+    salt = 'salted'
+    update_binary('sender', salt)
+    update_binary('receiver', salt)
 
 
 if __name__ == '__main__':

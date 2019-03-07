@@ -67,7 +67,7 @@ impl Local {
         let plan = ExperimentPlan::with_varying_counts(
             Duration::from_millis(5),
             Duration::from_secs(8),
-            [20, 30, 40, 50, 60, 70, 80, 90, 100, 120].iter().cloned(),
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120].iter().cloned(),
         );
         let tcp_socket =
             TcpListener::bind(("0.0.0.0", net::TCP_PORT)).expect("Could not bind TCP socket");
@@ -93,6 +93,7 @@ impl Local {
                 })
                 .sync()?;
             assert!(lambda_status.status_code.unwrap() == 202);
+            info!("{:#?}", lambda_status);
             info!("Waiting for sender");
             let (mut stream, tcp_addr) = tcp_socket.accept().unwrap();
             info!("Sender TCP addr {:?}", tcp_addr);

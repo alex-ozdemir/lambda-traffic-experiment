@@ -9,7 +9,7 @@ pub const TCP_PORT: u16 = 50002;
 /// Create a UDP socker and determine it's public `SocketAddr`.
 pub fn open_public_udp() -> (UdpSocket, SocketAddr) {
     let socket = UdpSocket::bind(("0.0.0.0", UDP_PORT)).unwrap();
-    let stun_addr = ("stun4.l.google.com", 19302);
+    let stun_addr = ("stun.l.google.com", 19302);
     // TODO: There are a few Vec<u8>'s in here that should be &[u8].
     // This library forces that, but it's stupid and we should write this ourselves or find a
     // different library.
