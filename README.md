@@ -16,6 +16,18 @@ have that, you should set the following environmental variables:
 You're also going to need a public IP. The system will figure out your public IP
 on its own, but it does need to be public.
 
+## System Setup
+
+You'll need a rust compiler. Use [rustup](https://rustup.rs/).
+
+You'll need the MUSL target to build for execution on lambda. Run
+
+```
+rustup target add x86_64-unknown-linux-musl
+```
+
+You may need MUSL on your system. Install it.
+
 ## Building and deploying
 
 Build using `cargo build --release`. Deploy the new lambda code by running the
@@ -27,7 +39,7 @@ change to the remote function.
 Start the local program on your machine by running
 
 ```
-./target/x86_64-unknown-linux-musl/release/local
+./target/x86_64-unknown-linux-musl/release/local dipair 1 myexperiment
 ```
 
 (use `-h` to see the options).
@@ -35,7 +47,7 @@ Start the local program on your machine by running
 Run
 
 ```
-./analyze EXP_NAME
+./analyze myexperiment
 ```
 
 to download and see the results.
