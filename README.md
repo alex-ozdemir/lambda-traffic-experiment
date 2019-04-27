@@ -7,6 +7,14 @@ Testing the network on AWS Lambda
 You're going to need a rust compiler. [Rustup](https://rustup.rs/) is the
 recommended installation tool for the Rust compiler and other rust tools.
 
+You'll need the MUSL target to build for execution on lambda. Run
+
+```
+rustup target add x86_64-unknown-linux-musl
+```
+
+You may need MUSL on your system. Install it.
+
 You're also going to need an Amazon account with Lambda and S3 access. Once you
 have that, you should set the following environmental variables:
    * `AWS_ACCESS_KEY_ID`
@@ -15,18 +23,6 @@ have that, you should set the following environmental variables:
 
 You're also going to need a public IP. The system will figure out your public IP
 on its own, but it does need to be public.
-
-## System Setup
-
-You'll need a rust compiler. Use [rustup](https://rustup.rs/).
-
-You'll need the MUSL target to build for execution on lambda. Run
-
-```
-rustup target add x86_64-unknown-linux-musl
-```
-
-You may need MUSL on your system. Install it.
 
 ## Building and deploying
 
@@ -47,7 +43,7 @@ Start the local program on your machine by running
 Run
 
 ```
-./analyze myexperiment
+./analyze.py myexperiment
 ```
 
 to download and see the results.
