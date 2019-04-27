@@ -53,10 +53,6 @@ def install_lambda_package(package_file, function_name, region):
                         }
                     },
                 )
-        #response = client.update_function_code(
-        #    FunctionName=function_name,
-        #    ZipFile=package_data
-        #)
         print("Updated function '{}' ({}).".format(
             function_name, response['FunctionArn']))
     except botocore.exceptions.ClientError as e:
@@ -87,7 +83,7 @@ def main():
     args = parser.parse_args()
     #update_binary('sender')
     #update_binary('receiver')
-    update_binary('complete-remote')
+    update_binary('remote')
 
 
 if __name__ == '__main__':

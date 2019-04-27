@@ -1,6 +1,5 @@
 /target
 /Cargo.lock
-/results/data*
-/results/tables
-/results/graphs
+/data
+/results
 **/*.rs.bk

@@ -2,7 +2,7 @@
 extern crate lambda_runtime as lambda;
 #[macro_use]
 extern crate serde_derive;
-extern crate rusoto_core;
+extern crate rusoto_core as aws;
 extern crate rusoto_s3;
 extern crate serde_json;
 #[macro_use]
@@ -498,7 +498,8 @@ impl Remote {
         match self.puncher.read_socket::<Packet>()? {
             Some((size, Packet { from, to, round })) => {
                 if to == self.remote_id {
-                    self.progress.record_receipt(from, (size + 28) as u64, round);
+                    self.progress
+                        .record_receipt(from, (size + 28) as u64, round);
                     Ok(())
                 } else {
                     warn!(
@@ -611,7 +612,7 @@ impl Remote {
                 Ok(None) => {}
                 Err(e) => {
                     if self.progress.round_id as usize == self.progress.round_plans.len() {
-                        let client = rusoto_s3::S3Client::new(rusoto_core::Region::UsWest1);
+                        let client = rusoto_s3::S3Client::new(aws::Region::UsWest1);
                         let string = format!("{}", self.progress.results);
                         info!("Done: \n{}", string);
                         let put = client

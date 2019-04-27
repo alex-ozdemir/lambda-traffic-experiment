@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 import pandas as pd
 import numpy as np
@@ -56,7 +56,9 @@ def sync_experiment(exp_name):
                     print(f'Downloading {key}')
                     s3.download_file('aozdemir-network-test', key, fname)
 
-
+if len(sys.argv) != 2:
+    print('Provide an experiment name as the first argument')
+    sys.exit(2)
 exp_name = sys.argv[1]
 
 sync_experiment(exp_name)
@@ -77,20 +79,17 @@ def agg(df, key_fields, const_fields, sum_fields):
     data = [ key + v[0] + v[1] for key, v in M.items() ]
     return pd.DataFrame(data=data,columns=key_fields+const_fields+sum_fields)
 
-split_link = pd.concat([pd.read_csv(f'data/{exp_name}/{f}') for f in os.listdir(f'data/{exp_name}')], ignore_index=True)
-
-#print(len(split_link))
-
-#print(split_link)
+split_link = pd.concat([pd.read_csv(f'data/{exp_name}/{f}') for f in os.listdir(f'data/{exp_name}') if re.match('^\\d*.csv', f)], ignore_index=True)
 
 links = agg(split_link, ['from','to','round'], ['duration','packets_per_ms'], ['bytes_s','bytes_r','packets_s','packets_r'])
 links['senders'] = [int(a.bytes_s > 0) for _, a in links.iterrows()]
 links['receivers'] = [int(a.bytes_r > 0) for _, a in links.iterrows()]
 
-print(links)
+linkfile = f'data/{exp_name}/links.csv'
+links.to_csv(linkfile)
+print(f'Link data written to {linkfile}')
 
 net = agg(links, ['round'], ['duration','packets_per_ms'], ['senders', 'receivers', 'bytes_s','bytes_r','packets_s','packets_r'])
-#print(net)
 
 net['rate_r'] = net.bytes_r / net.duration * 8 / 10 ** 6 / net.senders
 net['rate_s'] = net.bytes_s / net.duration * 8 / 10 ** 6 / net.senders
@@ -100,4 +99,9 @@ del net['bytes_r']
 del net['bytes_s']
 del net['packets_r']
 del net['packets_s']
+
+netfile = f'data/{exp_name}/net.csv'
+net.to_csv(netfile)
+print(f'Net data written to {netfile}')
+print('Net data:')
 print(net)
