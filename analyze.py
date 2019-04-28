@@ -89,9 +89,9 @@ linkfile = f'data/{exp_name}/links.csv'
 links.to_csv(linkfile)
 print(f'Link data written to {linkfile}')
 
-net = agg(links, ['round', 'to'], ['duration','packets_per_ms','senders'], ['receivers', 'bytes_s','bytes_r','packets_s','packets_r'])
-print(net)
+net = agg(links, ['round', 'from'], ['duration','packets_per_ms','senders'], ['receivers', 'bytes_s','bytes_r','packets_s','packets_r'])
 net = agg(net, ['round'], ['duration','packets_per_ms','receivers'], ['senders', 'bytes_s','bytes_r','packets_s','packets_r'])
+net.receivers = net.senders
 
 net['rate_r'] = net.bytes_r / net.duration * 8 / 10 ** 6 / net.senders
 net['rate_s'] = net.bytes_s / net.duration * 8 / 10 ** 6 / net.senders
