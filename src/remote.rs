@@ -395,6 +395,15 @@ enum RemoteState {
     Send,
 }
 
+impl RemoteState {
+    fn started(&self) -> bool {
+        match self {
+            RemoteState::Establish | RemoteState::WaitForStart => false,
+            RemoteState::Receive | RemoteState::Send => true,
+        }
+    }
+}
+
 impl Remote {
     fn new(start: LambdaStart, c: lambda::Context) -> Self {
         info!("Starting with invocation {:?}", start);
@@ -596,6 +605,10 @@ impl Remote {
 
     fn run(&mut self, kill_time: Instant) {
         loop {
+            if self.downstream.len() == 0 && self.upstream.len() == 0 && self.state.started() {
+                info!("I'm a dummy node. Shutting down");
+                return;
+            }
             if Instant::now() > kill_time {
                 self.send_to_master(&LocalTcpMessage::Error(format!(
                     "Timout remote {}",

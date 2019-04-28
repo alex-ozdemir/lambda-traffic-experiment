@@ -20,12 +20,20 @@ Arguments:
 Options:
   -h --help         Show this screen.
   --rounds <arg>    the number of rounds to run in this experiment [default: 1]
-  --packets <arg>   the maximum rate of packets that should be sent by one
-                    sender in one round, packets/ms [default: 5]
+  --packets <arg>   the rate of packets (p/ms) sent by the each sender in the
+                    final round. The prior rounds uses linearly interpolated rates
+                    [default: 5]
   --sleep <arg>     how long the senders sleep between rounds [default: 2]
   --duration <arg>  how long each round should last, seconds [default: 8]
   --port <arg>      which port to use for UDP communication [default: 50000]
   --extra <arg>     start this many extra workers, which do nothing [default: 0]
+
+Examples:
+  local complete --rounds 4 --packets 20 --extra 10 5 myexp
+
+  Tests a complete topology on 5 nodes, where there are 10 extra dummy nodes
+  and 4 rounds during which packets are sent at 5, 10, 15, and 20 packets per
+  ms.
 ";
 
 #[derive(Debug, Deserialize)]

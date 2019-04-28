@@ -226,17 +226,10 @@ impl Local {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    simple_logger::init_with_level(log::Level::Info).unwrap();
-    let args = options::parse_args();
-    let rounds = msg::experiment::rounds_with_range_of_counts(
-        Duration::from_secs(args.flag_duration as u64),
-        Duration::from_secs(args.flag_sleep as u64),
-        args.flag_rounds,
-        args.flag_packets,
-    );
-    let region = aws::Region::from_str(&env::var("AWS_REGION").expect("AWS_REGION must be set"))
-        .expect("Invalid region");
+/// Given the command-line-options, constructs the network topology to test
+/// ## Returns
+/// Returns the number of remotes and and adjacency-list representation of the directed topology.
+fn construct_graph(args: &options::Args) -> (u16, BTreeMap<RemoteId, Vec<RemoteId>>) {
     let (mut n_remotes, mut recipients) = if args.cmd_complete {
         (
             args.arg_remotes.unwrap(),
@@ -263,8 +256,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         panic!("Unknown command")
     };
+
+    // Add in extras
     msg::experiment::add_extras(&mut recipients, args.flag_extra);
     n_remotes += args.flag_extra;
+    return (n_remotes, recipients);
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    simple_logger::init_with_level(log::Level::Info).unwrap();
+    let args = options::parse_args();
+    let rounds = msg::experiment::rounds_with_range_of_counts(
+        Duration::from_secs(args.flag_duration as u64),
+        Duration::from_secs(args.flag_sleep as u64),
+        args.flag_rounds,
+        args.flag_packets,
+    );
+    let region = aws::Region::from_str(&env::var("AWS_REGION").expect("AWS_REGION must be set"))
+        .expect("Invalid region");
+    let (n_remotes, recipients) = construct_graph(&args);
     let plan = ExperimentPlan { rounds, recipients };
     let mut local = Local::new(
         n_remotes,
