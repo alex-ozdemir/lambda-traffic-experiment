@@ -71,7 +71,7 @@ def agg(df, key_fields, const_fields, sum_fields):
         sum_ = tuple(r[f] for f in sum_fields)
         if key in M:
             c, s, j = M[key]
-            assert c == const, f'Row {j} had const values {c} but row {i} had {const}'
+            assert c == const, f'Row {j} had const values {c} but row {i} had {const} for columns {const_fields}'
             ss = tuple(a + b for a, b in zip(s, sum_))
             M[key] = (const, ss, j)
         else:
